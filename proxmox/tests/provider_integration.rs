@@ -60,6 +60,11 @@ async fn provider_lifecycle_with_mock_server() {
 
 #[tokio::test]
 async fn provider_handles_missing_endpoint() {
+    // Clear any environment variables
+    std::env::remove_var("PROXMOX_ENDPOINT");
+    std::env::remove_var("PROXMOX_API_TOKEN");
+    std::env::remove_var("PROXMOX_INSECURE");
+    
     let mut provider = ProxmoxProvider::new();
 
     let mut config_values = HashMap::new();
@@ -178,6 +183,11 @@ async fn provider_prefers_config_over_env_vars() {
 
 #[tokio::test]
 async fn provider_handles_missing_api_token() {
+    // Clear any environment variables
+    std::env::remove_var("PROXMOX_ENDPOINT");
+    std::env::remove_var("PROXMOX_API_TOKEN");
+    std::env::remove_var("PROXMOX_INSECURE");
+    
     let mut provider = ProxmoxProvider::new();
 
     let mut config_values = HashMap::new();
