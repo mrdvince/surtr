@@ -1,9 +1,6 @@
 # An OpenTofu/Terraform Provider for Proxmox
 
-> This is a learning project and experimentantion to see what is required to write providers in a different language essentially if it can be done and how it would look like.
-
-I use proxmox instances and have been using the Telmate provider for a while
-But i mostly used the `proxmox_vm_qemu` resource, for other resources I resulted to [stuff like this](https://mrdvince.me/proxmox-oidc-integration-and-terragrunt-hooks-day-36/)
+> ⚠️ This is a learning and experimentantion project to see what is required to write providers in a different language essentially if it can be done and how it would look like.
 
 ## Requirements
 
@@ -85,9 +82,35 @@ tofu apply
 
 | Argument | Type | Required | Description |
 |----------|------|----------|-------------|
-| `endpoint` | String | Yes | The Proxmox API endpoint URL (e.g., `https://pve.example.com:8006`) |
-| `api_token` | String | Yes | API token in format `user@realm!tokenid=secret` |
+| `endpoint` | String | Yes* | The Proxmox API endpoint URL (e.g., `https://pve.example.com:8006`) |
+| `api_token` | String | Yes* | API token in format `user@realm!tokenid=secret` |
 | `insecure` | Boolean | No | Skip TLS certificate verification (default: `false`) |
+
+*Required unless set via environment variable
+
+### Environment Variables
+
+The provider supports the following environment variables as fallbacks:
+
+| Variable | Description |
+|----------|-------------|
+| `PROXMOX_ENDPOINT` | The Proxmox API endpoint URL |
+| `PROXMOX_API_TOKEN` | API token for authentication |
+| `PROXMOX_INSECURE` | Skip TLS verification (true/false) |
+
+Example:
+```bash
+export PROXMOX_ENDPOINT="https://pve.example.com:8006"
+export PROXMOX_API_TOKEN="user@realm!tokenid=secret"
+export PROXMOX_INSECURE="false"
+```
+
+With environment variables set, you can use a minimal provider configuration:
+```
+provider "proxmox" {
+  # Configuration will be read from environment variables
+}
+```
 
 Planned to add:
 - [ ] Resource: `proxmox_vm_qemu` - to manage VMs
