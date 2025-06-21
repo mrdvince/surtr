@@ -15,8 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let provider = ProxmoxProvider::new();
     let server = ProviderServer::new(provider, cert_path, key_path);
-    
+
     server.run().await?;
-    
+
     Ok(())
 }

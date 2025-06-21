@@ -1,11 +1,17 @@
 pub mod api;
 pub mod data_sources;
 
-use tfplug::{Config, DataSource, Diagnostics, Provider, Resource};
 use std::collections::HashMap;
+use tfplug::{Config, DataSource, Diagnostics, Provider, Resource};
 
 pub struct ProxmoxProvider {
     client: Option<api::Client>,
+}
+
+impl Default for ProxmoxProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProxmoxProvider {
@@ -38,21 +44,31 @@ impl Provider for ProxmoxProvider {
             .values
             .get("insecure")
             .and_then(|v| v.as_bool())
-            .or_else(|| std::env::var("PROXMOX_INSECURE").ok()
-                .and_then(|v| v.parse::<bool>().ok()))
+            .or_else(|| {
+                std::env::var("PROXMOX_INSECURE")
+                    .ok()
+                    .and_then(|v| v.parse::<bool>().ok())
+            })
             .unwrap_or(false);
 
-        self.client = Some(api::Client::new(endpoint.clone(), api_token.clone(), insecure)?);
+        self.client = Some(api::Client::new(
+            endpoint.clone(),
+            api_token.clone(),
+            insecure,
+        )?);
 
         Ok(diags)
     }
 
     fn get_schema(&self) -> HashMap<String, tfplug::provider::DataSourceSchema> {
         let mut schemas = HashMap::new();
-        
+
         // Schema should be available without client
-        schemas.insert("proxmox_version".to_string(), data_sources::VersionDataSource::schema_static());
-        
+        schemas.insert(
+            "proxmox_version".to_string(),
+            data_sources::VersionDataSource::schema_static(),
+        );
+
         schemas
     }
 
@@ -62,16 +78,17 @@ impl Provider for ProxmoxProvider {
 
     fn get_data_sources(&self) -> HashMap<String, Box<dyn DataSource>> {
         let mut sources = HashMap::new();
-        
+
         // Return empty map if client is not initialized
         // The framework should configure the provider before calling read on data sources
         if let Some(client) = &self.client {
             sources.insert(
                 "proxmox_version".to_string(),
-                Box::new(data_sources::VersionDataSource::new(client.clone())) as Box<dyn DataSource>,
+                Box::new(data_sources::VersionDataSource::new(client.clone()))
+                    as Box<dyn DataSource>,
             );
         }
-        
+
         sources
     }
 }

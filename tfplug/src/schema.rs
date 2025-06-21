@@ -9,6 +9,12 @@ pub struct AttributeBuilder {
     attribute: Attribute,
 }
 
+impl Default for SchemaBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SchemaBuilder {
     pub fn new() -> Self {
         Self {
@@ -139,15 +145,15 @@ mod tests {
 
         assert_eq!(schema.version, 1);
         assert_eq!(schema.attributes.len(), 4);
-        
+
         let id_attr = &schema.attributes["id"];
         assert!(id_attr.computed);
         assert!(!id_attr.required);
-        
+
         let name_attr = &schema.attributes["name"];
         assert!(name_attr.required);
         assert!(!name_attr.optional);
-        
+
         let enabled_attr = &schema.attributes["enabled"];
         assert!(enabled_attr.optional);
         assert!(!enabled_attr.required);
@@ -158,16 +164,22 @@ mod tests {
         let required_attr = AttributeBuilder::string("test").required().build();
         assert!(required_attr.required);
         assert!(!required_attr.optional);
-        
+
         let optional_attr = AttributeBuilder::string("test").optional().build();
         assert!(optional_attr.optional);
         assert!(!optional_attr.required);
-        
-        let req_then_opt = AttributeBuilder::string("test").required().optional().build();
+
+        let req_then_opt = AttributeBuilder::string("test")
+            .required()
+            .optional()
+            .build();
         assert!(req_then_opt.optional);
         assert!(!req_then_opt.required);
-        
-        let opt_then_req = AttributeBuilder::string("test").optional().required().build();
+
+        let opt_then_req = AttributeBuilder::string("test")
+            .optional()
+            .required()
+            .build();
         assert!(opt_then_req.required);
         assert!(!opt_then_req.optional);
     }
@@ -175,12 +187,15 @@ mod tests {
     #[test]
     fn sensitive_attribute_configuration() {
         let schema = SchemaBuilder::new()
-            .attribute("password", AttributeBuilder::string("password")
-                .required()
-                .sensitive()
-                .description("API password"))
+            .attribute(
+                "password",
+                AttributeBuilder::string("password")
+                    .required()
+                    .sensitive()
+                    .description("API password"),
+            )
             .build_resource(0);
-        
+
         let password_attr = &schema.attributes["password"];
         assert!(password_attr.sensitive);
         assert!(password_attr.required);
@@ -191,10 +206,16 @@ mod tests {
     fn computed_attributes_common_pattern() {
         let schema = SchemaBuilder::new()
             .attribute("id", AttributeBuilder::string("id").computed())
-            .attribute("created_at", AttributeBuilder::string("created_at").computed())
-            .attribute("updated_at", AttributeBuilder::string("updated_at").computed())
+            .attribute(
+                "created_at",
+                AttributeBuilder::string("created_at").computed(),
+            )
+            .attribute(
+                "updated_at",
+                AttributeBuilder::string("updated_at").computed(),
+            )
             .build_resource(1);
-        
+
         for attr_name in ["id", "created_at", "updated_at"] {
             let attr = &schema.attributes[attr_name];
             assert!(attr.computed);
@@ -209,7 +230,7 @@ mod tests {
             .attribute("test", AttributeBuilder::string("test"))
             .build_data_source(42);
         assert_eq!(data_source.version, 42);
-        
+
         let resource = SchemaBuilder::new()
             .attribute("test", AttributeBuilder::string("test"))
             .build_resource(99);

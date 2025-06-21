@@ -15,7 +15,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmp_serde::{to_vec_named, from_slice};
+    use rmp_serde::{from_slice, to_vec_named};
     use std::collections::HashMap;
 
     #[test]
@@ -23,12 +23,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("key".to_string(), Dynamic::String("value".to_string()));
         map.insert("number".to_string(), Dynamic::Number(42.0));
-        
+
         let dynamic = Dynamic::Map(map);
-        
+
         let encoded = to_vec_named(&dynamic).unwrap();
         let decoded: Dynamic = from_slice(&encoded).unwrap();
-        
+
         match decoded {
             Dynamic::Map(m) => {
                 assert_eq!(m.get("key").unwrap().as_string().unwrap(), "value");
@@ -43,14 +43,20 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("id".to_string(), Dynamic::String("test-123".to_string()));
         values.insert("enabled".to_string(), Dynamic::Bool(true));
-        
+
         let state = State { values };
-        
+
         let encoded = to_vec_named(&state).unwrap();
         let decoded: State = from_slice(&encoded).unwrap();
-        
-        assert_eq!(decoded.values.get("id").unwrap().as_string().unwrap(), "test-123");
-        assert_eq!(decoded.values.get("enabled").unwrap().as_bool().unwrap(), true);
+
+        assert_eq!(
+            decoded.values.get("id").unwrap().as_string().unwrap(),
+            "test-123"
+        );
+        assert_eq!(
+            decoded.values.get("enabled").unwrap().as_bool().unwrap(),
+            true
+        );
     }
 
     #[test]
@@ -58,7 +64,7 @@ mod tests {
         let dynamic = Dynamic::Null;
         let encoded = to_vec_named(&dynamic).unwrap();
         let decoded: Dynamic = from_slice(&encoded).unwrap();
-        
+
         assert!(matches!(decoded, Dynamic::Null));
     }
 
@@ -66,19 +72,19 @@ mod tests {
     fn nested_dynamic_structures() {
         let mut inner = HashMap::new();
         inner.insert("nested".to_string(), Dynamic::String("value".to_string()));
-        
+
         let mut outer = HashMap::new();
-        outer.insert("list".to_string(), Dynamic::List(vec![
-            Dynamic::Number(1.0),
-            Dynamic::Number(2.0),
-        ]));
+        outer.insert(
+            "list".to_string(),
+            Dynamic::List(vec![Dynamic::Number(1.0), Dynamic::Number(2.0)]),
+        );
         outer.insert("map".to_string(), Dynamic::Map(inner));
-        
+
         let dynamic = Dynamic::Map(outer);
-        
+
         let encoded = to_vec_named(&dynamic).unwrap();
         let decoded: Dynamic = from_slice(&encoded).unwrap();
-        
+
         match decoded {
             Dynamic::Map(m) => {
                 match m.get("list").unwrap() {
@@ -87,7 +93,10 @@ mod tests {
                 }
                 match m.get("map").unwrap() {
                     Dynamic::Map(inner_map) => {
-                        assert_eq!(inner_map.get("nested").unwrap().as_string().unwrap(), "value");
+                        assert_eq!(
+                            inner_map.get("nested").unwrap().as_string().unwrap(),
+                            "value"
+                        );
                     }
                     _ => panic!("Expected Map"),
                 }

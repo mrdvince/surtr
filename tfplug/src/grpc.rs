@@ -43,22 +43,25 @@ impl<P: Provider + 'static> ProviderServer<P> {
         let addr = "127.0.0.1:0";
         let listener = TcpListener::bind(addr).await?;
         let bound_addr = listener.local_addr()?;
-        
+
         println!("1|6|tcp|127.0.0.1:{}|grpc", bound_addr.port());
-        eprintln!("DEBUG: Provider server started on port {}", bound_addr.port());
+        eprintln!(
+            "DEBUG: Provider server started on port {}",
+            bound_addr.port()
+        );
 
         let stream = TcpListenerStream::new(listener);
-        
+
         let service = ProviderService {
             provider: self.provider.clone(),
         };
-        
+
         Server::builder()
             .tls_config(tls_config)?
             .add_service(ProtoProviderServer::new(service))
             .serve_with_incoming(stream)
             .await?;
-        
+
         Ok(())
     }
 }
@@ -69,14 +72,13 @@ struct ProviderService<P> {
 
 #[tonic::async_trait]
 impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
-
     async fn get_provider_schema(
         &self,
         _request: Request<get_provider_schema::Request>,
     ) -> std::result::Result<Response<get_provider_schema::Response>, Status> {
         let provider = self.provider.lock().unwrap();
         let data_source_schemas = provider.get_schema();
-        
+
         let provider_schema = Schema {
             version: 0,
             block: Some(schema::Block {
@@ -137,8 +139,10 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
                     version: schema.version,
                     block: Some(schema::Block {
                         version: schema.version,
-                        attributes: schema.attributes.into_iter().map(|(_, attr)| {
-                            schema::Attribute {
+                        attributes: schema
+                            .attributes
+                            .into_values()
+                            .map(|attr| schema::Attribute {
                                 name: attr.name.clone(),
                                 r#type: attr.r#type.clone(),
                                 description: attr.description.clone(),
@@ -150,8 +154,8 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
                                 deprecated: false,
                                 nested_type: None,
                                 write_only: false,
-                            }
-                        }).collect(),
+                            })
+                            .collect(),
                         block_types: vec![],
                         description: String::new(),
                         description_kind: StringKind::Plain as i32,
@@ -160,7 +164,7 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
                 },
             );
         }
-        
+
         Ok(Response::new(get_provider_schema::Response {
             provider: Some(provider_schema),
             resource_schemas: HashMap::new(),
@@ -183,7 +187,7 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
     ) -> std::result::Result<Response<validate_provider_config::Response>, Status> {
         let req = request.into_inner();
         let _config = decode_dynamic_value(&req.config)?;
-        
+
         Ok(Response::new(validate_provider_config::Response {
             diagnostics: vec![],
         }))
@@ -195,15 +199,19 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
     ) -> std::result::Result<Response<configure_provider::Response>, Status> {
         let req = request.into_inner();
         let config = decode_dynamic_value(&req.config)?;
-        
-        eprintln!("DEBUG: configure_provider called with config: {:?}", config.values.keys().collect::<Vec<_>>());
-        
+
+        eprintln!(
+            "DEBUG: configure_provider called with config: {:?}",
+            config.values.keys().collect::<Vec<_>>()
+        );
+
         let mut provider = self.provider.lock().unwrap();
-        let diags = provider.configure(config)
+        let diags = provider
+            .configure(config)
             .map_err(|e| Status::internal(format!("Failed to configure provider: {}", e)))?;
-        
+
         eprintln!("DEBUG: Provider configured successfully");
-        
+
         Ok(Response::new(configure_provider::Response {
             diagnostics: convert_diagnostics(diags),
         }))
@@ -276,25 +284,29 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
         let req = request.into_inner();
         let type_name = req.type_name;
         let config = decode_dynamic_value(&req.config)?;
-        
+
         eprintln!("DEBUG: read_data_source called for {}", type_name);
-        
+
         let provider = self.provider.lock().unwrap();
         let data_sources = provider.get_data_sources();
-        
-        eprintln!("DEBUG: Available data sources: {:?}", data_sources.keys().collect::<Vec<_>>());
-        
-        let data_source = data_sources
-            .get(&type_name)
-            .ok_or_else(|| Status::invalid_argument(format!("Unknown data source: {}", type_name)))?;
-        
+
+        eprintln!(
+            "DEBUG: Available data sources: {:?}",
+            data_sources.keys().collect::<Vec<_>>()
+        );
+
+        let data_source = data_sources.get(&type_name).ok_or_else(|| {
+            Status::invalid_argument(format!("Unknown data source: {}", type_name))
+        })?;
+
         eprintln!("DEBUG: Calling read on data source");
-        
-        let (state, diags) = data_source.read(config)
+
+        let (state, diags) = data_source
+            .read(config)
             .map_err(|e| Status::internal(format!("Failed to read data source: {}", e)))?;
-        
+
         eprintln!("DEBUG: Read completed successfully");
-        
+
         Ok(Response::new(read_data_source::Response {
             state: Some(encode_dynamic_value(&state)?),
             diagnostics: convert_diagnostics(diags),
@@ -365,9 +377,11 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
         &self,
         _request: Request<validate_ephemeral_resource_config::Request>,
     ) -> std::result::Result<Response<validate_ephemeral_resource_config::Response>, Status> {
-        Ok(Response::new(validate_ephemeral_resource_config::Response {
-            diagnostics: vec![],
-        }))
+        Ok(Response::new(
+            validate_ephemeral_resource_config::Response {
+                diagnostics: vec![],
+            },
+        ))
     }
 
     async fn open_ephemeral_resource(
@@ -400,9 +414,12 @@ fn bool_type() -> Vec<u8> {
     "\"bool\"".as_bytes().to_vec()
 }
 
+#[allow(clippy::result_large_err)]
 fn decode_dynamic_value(value: &Option<DynamicValue>) -> std::result::Result<Config, Status> {
-    let value = value.as_ref().ok_or_else(|| Status::invalid_argument("Missing value"))?;
-    
+    let value = value
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("Missing value"))?;
+
     if !value.msgpack.is_empty() {
         let values: HashMap<String, Dynamic> = decode::from_slice(&value.msgpack)
             .map_err(|e| Status::invalid_argument(format!("Failed to decode msgpack: {}", e)))?;
@@ -412,14 +429,17 @@ fn decode_dynamic_value(value: &Option<DynamicValue>) -> std::result::Result<Con
             .map_err(|e| Status::invalid_argument(format!("Failed to decode json: {}", e)))?;
         Ok(Config { values })
     } else {
-        Ok(Config { values: HashMap::new() })
+        Ok(Config {
+            values: HashMap::new(),
+        })
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn encode_dynamic_value(state: &State) -> std::result::Result<DynamicValue, Status> {
     let msgpack = encode::to_vec_named(&state.values)
         .map_err(|e| Status::internal(format!("Failed to encode msgpack: {}", e)))?;
-    
+
     Ok(DynamicValue {
         msgpack,
         json: vec![],
@@ -428,7 +448,7 @@ fn encode_dynamic_value(state: &State) -> std::result::Result<DynamicValue, Stat
 
 fn convert_diagnostics(diags: TfplugDiagnostics) -> Vec<Diagnostic> {
     let mut result = Vec::new();
-    
+
     for diag in diags.errors {
         result.push(Diagnostic {
             severity: diagnostic::Severity::Error as i32,
@@ -437,7 +457,7 @@ fn convert_diagnostics(diags: TfplugDiagnostics) -> Vec<Diagnostic> {
             attribute: None,
         });
     }
-    
+
     for diag in diags.warnings {
         result.push(Diagnostic {
             severity: diagnostic::Severity::Warning as i32,
@@ -446,6 +466,6 @@ fn convert_diagnostics(diags: TfplugDiagnostics) -> Vec<Diagnostic> {
             attribute: None,
         });
     }
-    
+
     result
 }
