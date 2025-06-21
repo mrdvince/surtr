@@ -64,7 +64,7 @@ async fn provider_handles_missing_endpoint() {
     std::env::remove_var("PROXMOX_ENDPOINT");
     std::env::remove_var("PROXMOX_API_TOKEN");
     std::env::remove_var("PROXMOX_INSECURE");
-    
+
     let mut provider = ProxmoxProvider::new();
 
     let mut config_values = HashMap::new();
@@ -187,7 +187,7 @@ async fn provider_handles_missing_api_token() {
     std::env::remove_var("PROXMOX_ENDPOINT");
     std::env::remove_var("PROXMOX_API_TOKEN");
     std::env::remove_var("PROXMOX_INSECURE");
-    
+
     let mut provider = ProxmoxProvider::new();
 
     let mut config_values = HashMap::new();

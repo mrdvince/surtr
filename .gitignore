@@ -3,3 +3,4 @@
 *.tfstate*
 .terraformrc
 .env
+iac/Taskfile.yml

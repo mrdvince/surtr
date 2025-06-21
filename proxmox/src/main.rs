@@ -5,7 +5,8 @@ use tfplug::grpc::ProviderServer;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(std::io::stderr)
         .init();
 
     let exe_dir = env::current_exe()?.parent().unwrap().to_path_buf();

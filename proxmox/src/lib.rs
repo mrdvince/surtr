@@ -1,5 +1,6 @@
 pub mod api;
 pub mod data_sources;
+pub mod resources;
 
 use std::collections::HashMap;
 use tfplug::{Config, DataSource, Diagnostics, Provider, Resource};
@@ -72,8 +73,30 @@ impl Provider for ProxmoxProvider {
         schemas
     }
 
+    fn get_resource_schemas(&self) -> HashMap<String, tfplug::provider::ResourceSchema> {
+        let mut schemas = HashMap::new();
+
+        // Resource schemas should be available without client
+        schemas.insert(
+            "proxmox_realm".to_string(),
+            resources::RealmResource::schema_static(),
+        );
+
+        schemas
+    }
+
     fn get_resources(&self) -> HashMap<String, Box<dyn Resource>> {
-        HashMap::new()
+        let mut resources = HashMap::new();
+
+        // Return empty map if client is not initialized
+        if let Some(client) = &self.client {
+            resources.insert(
+                "proxmox_realm".to_string(),
+                Box::new(resources::RealmResource::new(client.clone())) as Box<dyn Resource>,
+            );
+        }
+
+        resources
     }
 
     fn get_data_sources(&self) -> HashMap<String, Box<dyn DataSource>> {

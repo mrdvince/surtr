@@ -7,6 +7,8 @@ pub trait Provider: Send + Sync {
 
     fn get_schema(&self) -> HashMap<String, DataSourceSchema>;
 
+    fn get_resource_schemas(&self) -> HashMap<String, ResourceSchema>;
+
     fn get_resources(&self) -> HashMap<String, Box<dyn Resource>>;
 
     fn get_data_sources(&self) -> HashMap<String, Box<dyn DataSource>>;

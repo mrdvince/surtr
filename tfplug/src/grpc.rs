@@ -78,6 +78,7 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
     ) -> std::result::Result<Response<get_provider_schema::Response>, Status> {
         let provider = self.provider.lock().unwrap();
         let data_source_schemas = provider.get_schema();
+        let resource_schemas = provider.get_resource_schemas();
 
         let provider_schema = Schema {
             version: 0,
@@ -165,9 +166,43 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
             );
         }
 
+        let mut resources = HashMap::new();
+        for (name, schema) in resource_schemas {
+            resources.insert(
+                name,
+                Schema {
+                    version: schema.version,
+                    block: Some(schema::Block {
+                        version: schema.version,
+                        attributes: schema
+                            .attributes
+                            .into_values()
+                            .map(|attr| schema::Attribute {
+                                name: attr.name.clone(),
+                                r#type: attr.r#type.clone(),
+                                description: attr.description.clone(),
+                                required: attr.required,
+                                optional: attr.optional,
+                                computed: attr.computed,
+                                sensitive: attr.sensitive,
+                                description_kind: StringKind::Plain as i32,
+                                deprecated: false,
+                                nested_type: None,
+                                write_only: false,
+                            })
+                            .collect(),
+                        block_types: vec![],
+                        description: String::new(),
+                        description_kind: StringKind::Plain as i32,
+                        deprecated: false,
+                    }),
+                },
+            );
+        }
+
         Ok(Response::new(get_provider_schema::Response {
             provider: Some(provider_schema),
-            resource_schemas: HashMap::new(),
+            resource_schemas: resources,
             data_source_schemas: data_sources,
             functions: HashMap::new(),
             ephemeral_resource_schemas: HashMap::new(),
@@ -228,9 +263,17 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
 
     async fn validate_resource_config(
         &self,
-        _request: Request<validate_resource_config::Request>,
+        request: Request<validate_resource_config::Request>,
     ) -> std::result::Result<Response<validate_resource_config::Response>, Status> {
-        todo!()
+        let req = request.into_inner();
+        let _type_name = req.type_name;
+        let _config = decode_dynamic_value(&req.config)?;
+
+        // For now, we'll just return success
+        // Real validation would check required fields, types, etc.
+        Ok(Response::new(validate_resource_config::Response {
+            diagnostics: vec![],
+        }))
     }
 
     async fn validate_data_resource_config(
@@ -244,23 +287,244 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
 
     async fn read_resource(
         &self,
-        _request: Request<read_resource::Request>,
+        request: Request<read_resource::Request>,
     ) -> std::result::Result<Response<read_resource::Response>, Status> {
-        todo!()
+        let req = request.into_inner();
+        let type_name = req.type_name;
+
+        let provider = self.provider.lock().unwrap();
+        let resources = provider.get_resources();
+
+        let resource = resources
+            .get(&type_name)
+            .ok_or_else(|| Status::not_found(format!("Unknown resource type: {}", type_name)))?;
+
+        let current_state = decode_dynamic_value(&req.current_state)?;
+        let state = State {
+            values: current_state.values,
+        };
+
+        match resource.read(state) {
+            Ok((new_state, diags)) => {
+                let (new_state_value, encoded_state) = match new_state {
+                    Some(state) => {
+                        let encoded = encode_state(&state)?;
+                        (encoded, vec![])
+                    }
+                    None => match &req.current_state {
+                        Some(state) => (state.clone(), vec![]),
+                        None => (
+                            DynamicValue {
+                                msgpack: vec![],
+                                json: vec![],
+                            },
+                            vec![],
+                        ),
+                    },
+                };
+
+                Ok(Response::new(read_resource::Response {
+                    new_state: Some(new_state_value),
+                    diagnostics: encode_diagnostics(&diags),
+                    private: encoded_state,
+                    deferred: None,
+                    new_identity: None,
+                }))
+            }
+            Err(e) => {
+                let mut diags = TfplugDiagnostics::new();
+                diags.add_error(format!("Failed to read resource: {}", e), None::<String>);
+                Ok(Response::new(read_resource::Response {
+                    new_state: req.current_state.clone(),
+                    diagnostics: encode_diagnostics(&diags),
+                    private: vec![],
+                    deferred: None,
+                    new_identity: None,
+                }))
+            }
+        }
     }
 
     async fn plan_resource_change(
         &self,
-        _request: Request<plan_resource_change::Request>,
+        request: Request<plan_resource_change::Request>,
     ) -> std::result::Result<Response<plan_resource_change::Response>, Status> {
-        todo!()
+        use crate::proto::tfplugin6::attribute_path::Step;
+        use crate::proto::tfplugin6::AttributePath;
+
+        let req = request.into_inner();
+        let type_name = req.type_name;
+
+        let provider = self.provider.lock().unwrap();
+        let resources = provider.get_resources();
+
+        let _resource = resources
+            .get(&type_name)
+            .ok_or_else(|| Status::not_found(format!("Unknown resource type: {}", type_name)))?;
+
+        let prior_state = decode_dynamic_value(&req.prior_state)?.values;
+        let config = decode_dynamic_value(&req.config)?.values;
+        let proposed_new_state = decode_dynamic_value(&req.proposed_new_state)?.values;
+
+        // For planning, we mostly just return the proposed state
+        // Real validation happens during apply
+        let planned_state = if prior_state.is_empty() && !proposed_new_state.is_empty() {
+            // This is a create operation
+            proposed_new_state
+        } else if !prior_state.is_empty() && proposed_new_state.is_empty() {
+            // This is a delete operation
+            HashMap::new()
+        } else {
+            // This is an update operation
+            proposed_new_state
+        };
+
+        // Check if we need to replace the resource (ForceNew attributes)
+        let mut requires_replace = Vec::new();
+
+        // For realm resource, "realm" and "type" are ForceNew
+        if type_name == "proxmox_realm" {
+            if let (Some(prior_realm), Some(new_realm)) = (
+                prior_state.get("realm").and_then(|v| v.as_string()),
+                config.get("realm").and_then(|v| v.as_string()),
+            ) {
+                if prior_realm != new_realm {
+                    requires_replace.push(AttributePath {
+                        steps: vec![Step {
+                            selector: Some(crate::proto::tfplugin6::attribute_path::step::Selector::AttributeName("realm".to_string())),
+                        }],
+                    });
+                }
+            }
+
+            if let (Some(prior_type), Some(new_type)) = (
+                prior_state.get("type").and_then(|v| v.as_string()),
+                config.get("type").and_then(|v| v.as_string()),
+            ) {
+                if prior_type != new_type {
+                    requires_replace.push(AttributePath {
+                        steps: vec![Step {
+                            selector: Some(crate::proto::tfplugin6::attribute_path::step::Selector::AttributeName("type".to_string())),
+                        }],
+                    });
+                }
+            }
+        }
+
+        let encoded_planned_state = encode_dynamic_values(&planned_state)?;
+
+        Ok(Response::new(plan_resource_change::Response {
+            planned_state: Some(encoded_planned_state),
+            requires_replace,
+            planned_private: vec![],
+            diagnostics: vec![],
+            legacy_type_system: false,
+            deferred: None,
+            planned_identity: None,
+        }))
     }
 
     async fn apply_resource_change(
         &self,
-        _request: Request<apply_resource_change::Request>,
+        request: Request<apply_resource_change::Request>,
     ) -> std::result::Result<Response<apply_resource_change::Response>, Status> {
-        todo!()
+        let req = request.into_inner();
+        let type_name = req.type_name;
+
+        let provider = self.provider.lock().unwrap();
+        let resources = provider.get_resources();
+
+        let resource = resources
+            .get(&type_name)
+            .ok_or_else(|| Status::not_found(format!("Unknown resource type: {}", type_name)))?;
+
+        let prior_state = decode_dynamic_value(&req.prior_state)?.values;
+        let config = decode_dynamic_value(&req.config)?.values;
+        let planned_state = decode_dynamic_value(&req.planned_state)?.values;
+
+        // Determine the operation type
+        let is_create = prior_state.is_empty() && !planned_state.is_empty();
+        let is_delete = !prior_state.is_empty() && planned_state.is_empty();
+        let is_update = !prior_state.is_empty() && !planned_state.is_empty();
+
+        let result = if is_create {
+            // Create operation
+            let config = Config { values: config };
+            resource.create(config)
+        } else if is_delete {
+            // Delete operation
+            let state = State {
+                values: prior_state.clone(),
+            };
+            match resource.delete(state) {
+                Ok(diags) => Ok((
+                    State {
+                        values: HashMap::new(),
+                    },
+                    diags,
+                )),
+                Err(e) => Err(e),
+            }
+        } else if is_update {
+            // Update operation
+            let state = State {
+                values: prior_state.clone(),
+            };
+            let cfg = Config {
+                values: config.clone(),
+            };
+            resource.update(state, cfg)
+        } else {
+            // No-op
+            Ok((
+                State {
+                    values: planned_state.clone(),
+                },
+                TfplugDiagnostics::new(),
+            ))
+        };
+
+        match result {
+            Ok((new_state, diags)) => {
+                // For delete operations, return None for new_state
+                let new_state_value = if is_delete && new_state.values.is_empty() {
+                    None
+                } else {
+                    Some(encode_state(&new_state)?)
+                };
+
+                Ok(Response::new(apply_resource_change::Response {
+                    new_state: new_state_value,
+                    diagnostics: encode_diagnostics(&diags),
+                    private: vec![],
+                    legacy_type_system: false,
+                    new_identity: None,
+                }))
+            }
+            Err(e) => {
+                let mut diags = TfplugDiagnostics::new();
+                diags.add_error(
+                    format!("Failed to apply resource change: {}", e),
+                    None::<String>,
+                );
+
+                // For create operations that fail, we should return the planned state
+                // so Terraform can retry. For other operations, return the prior state.
+                let state_to_return = if is_create {
+                    &planned_state
+                } else {
+                    &prior_state
+                };
+
+                Ok(Response::new(apply_resource_change::Response {
+                    new_state: Some(encode_dynamic_values(state_to_return)?),
+                    diagnostics: encode_diagnostics(&diags),
+                    private: vec![],
+                    legacy_type_system: false,
+                    new_identity: None,
+                }))
+            }
+        }
     }
 
     async fn import_resource_state(
@@ -361,9 +625,23 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
 
     async fn upgrade_resource_state(
         &self,
-        _request: Request<upgrade_resource_state::Request>,
+        request: Request<upgrade_resource_state::Request>,
     ) -> std::result::Result<Response<upgrade_resource_state::Response>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        // For now, we don't handle state upgrades - just return the raw state as-is
+        // Convert RawState to DynamicValue
+        let upgraded_state = req.raw_state.as_ref().map(|raw| {
+            DynamicValue {
+                msgpack: vec![], // We'll use JSON for now
+                json: raw.json.clone(),
+            }
+        });
+
+        Ok(Response::new(upgrade_resource_state::Response {
+            upgraded_state,
+            diagnostics: vec![],
+        }))
     }
 
     async fn upgrade_resource_identity(
@@ -416,14 +694,33 @@ fn bool_type() -> Vec<u8> {
 
 #[allow(clippy::result_large_err)]
 fn decode_dynamic_value(value: &Option<DynamicValue>) -> std::result::Result<Config, Status> {
-    let value = value
-        .as_ref()
-        .ok_or_else(|| Status::invalid_argument("Missing value"))?;
+    let value = match value {
+        Some(v) => v,
+        None => {
+            return Ok(Config {
+                values: HashMap::new(),
+            })
+        }
+    };
 
     if !value.msgpack.is_empty() {
-        let values: HashMap<String, Dynamic> = decode::from_slice(&value.msgpack)
-            .map_err(|e| Status::invalid_argument(format!("Failed to decode msgpack: {}", e)))?;
-        Ok(Config { values })
+        // Try to decode as a map first, if that fails and it's null/unit, return empty
+        match decode::from_slice::<HashMap<String, Dynamic>>(&value.msgpack) {
+            Ok(values) => Ok(Config { values }),
+            Err(e) => {
+                // Check if it's just a null/unit value
+                match decode::from_slice::<Option<HashMap<String, Dynamic>>>(&value.msgpack) {
+                    Ok(None) => Ok(Config {
+                        values: HashMap::new(),
+                    }),
+                    Ok(Some(values)) => Ok(Config { values }),
+                    Err(_) => Err(Status::invalid_argument(format!(
+                        "Failed to decode msgpack: {}",
+                        e
+                    ))),
+                }
+            }
+        }
     } else if !value.json.is_empty() {
         let values: HashMap<String, Dynamic> = serde_json::from_slice(&value.json)
             .map_err(|e| Status::invalid_argument(format!("Failed to decode json: {}", e)))?;
@@ -444,6 +741,40 @@ fn encode_dynamic_value(state: &State) -> std::result::Result<DynamicValue, Stat
         msgpack,
         json: vec![],
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn encode_state(state: &State) -> std::result::Result<DynamicValue, Status> {
+    encode_dynamic_value(state)
+}
+
+#[allow(clippy::result_large_err)]
+fn encode_dynamic_values(
+    values: &HashMap<String, Dynamic>,
+) -> std::result::Result<DynamicValue, Status> {
+    let state = State {
+        values: values.clone(),
+    };
+    encode_dynamic_value(&state)
+}
+
+fn encode_diagnostics(diags: &TfplugDiagnostics) -> Vec<Diagnostic> {
+    diags
+        .errors
+        .iter()
+        .map(|e| Diagnostic {
+            severity: diagnostic::Severity::Error as i32,
+            summary: e.summary.clone(),
+            detail: e.detail.clone().unwrap_or_default(),
+            attribute: None,
+        })
+        .chain(diags.warnings.iter().map(|w| Diagnostic {
+            severity: diagnostic::Severity::Warning as i32,
+            summary: w.summary.clone(),
+            detail: w.detail.clone().unwrap_or_default(),
+            attribute: None,
+        }))
+        .collect()
 }
 
 fn convert_diagnostics(diags: TfplugDiagnostics) -> Vec<Diagnostic> {
