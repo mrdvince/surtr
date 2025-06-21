@@ -1,0 +1,5 @@
+/target
+/certs
+*.tfstate*
+.terraformrc
+.env
