@@ -22,18 +22,24 @@ impl Provider for ProxmoxProvider {
             .values
             .get("endpoint")
             .and_then(|v| v.as_string())
-            .ok_or("endpoint is required")?;
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("PROXMOX_ENDPOINT").ok())
+            .ok_or("endpoint is required (set in provider config or PROXMOX_ENDPOINT env var)")?;
 
         let api_token = config
             .values
             .get("api_token")
             .and_then(|v| v.as_string())
-            .ok_or("api_token is required")?;
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("PROXMOX_API_TOKEN").ok())
+            .ok_or("api_token is required (set in provider config or PROXMOX_API_TOKEN env var)")?;
 
         let insecure = config
             .values
             .get("insecure")
             .and_then(|v| v.as_bool())
+            .or_else(|| std::env::var("PROXMOX_INSECURE").ok()
+                .and_then(|v| v.parse::<bool>().ok()))
             .unwrap_or(false);
 
         self.client = Some(api::Client::new(endpoint.clone(), api_token.clone(), insecure)?);

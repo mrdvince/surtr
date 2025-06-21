@@ -44,15 +44,27 @@ impl Client {
     }
 
     pub async fn get_version(&self) -> Result<VersionInfo, ApiError> {
+        let url = format!("{}/api2/json/version", self.base_url);
+        tracing::debug!("Fetching version from: {}", url);
+        
         let response = self
             .http
-            .get(format!("{}/api2/json/version", self.base_url))
+            .get(url)
             .header("Authorization", format!("PVEAPIToken={}", self.api_token))
             .send()
             .await?;
 
-        if response.status() == 401 {
+        let status = response.status();
+        tracing::debug!("Response status: {}", status);
+        
+        if status == 401 {
             return Err(ApiError::AuthenticationFailed);
+        }
+        
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::error!("API error response: {}", error_text);
+            return Err(ApiError::InvalidUrl(format!("API returned {}: {}", status, error_text)));
         }
 
         let api_response: ApiResponse<VersionInfo> = response.json().await?;
