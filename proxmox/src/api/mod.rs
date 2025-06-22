@@ -161,6 +161,28 @@ impl Client {
             );
         }
 
+        if let Some(groups_overwrite) = config.groups_overwrite {
+            form_data.insert(
+                "groups-overwrite",
+                if groups_overwrite {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+        }
+
+        if let Some(groups_autocreate) = config.groups_autocreate {
+            form_data.insert(
+                "groups-autocreate",
+                if groups_autocreate {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+        }
+
         if let Some(comment) = config.comment {
             form_data.insert("comment", comment);
         }
@@ -241,6 +263,20 @@ impl Client {
 
         if let Some(comment) = config.comment {
             form_data.insert("comment".to_string(), comment);
+        }
+
+        if let Some(groups_overwrite) = config.groups_overwrite {
+            form_data.insert(
+                "groups-overwrite".to_string(),
+                if groups_overwrite { "1" } else { "0" }.to_string(),
+            );
+        }
+
+        if let Some(groups_autocreate) = config.groups_autocreate {
+            form_data.insert(
+                "groups-autocreate".to_string(),
+                if groups_autocreate { "1" } else { "0" }.to_string(),
+            );
         }
 
         // Note: username-claim is not included in updates as Proxmox API doesn't accept it
@@ -333,6 +369,10 @@ pub struct RealmConfig {
     pub default: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    #[serde(rename = "groups-overwrite", skip_serializing_if = "Option::is_none")]
+    pub groups_overwrite: Option<bool>,
+    #[serde(rename = "groups-autocreate", skip_serializing_if = "Option::is_none")]
+    pub groups_autocreate: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,6 +388,10 @@ pub struct RealmInfo {
     pub autocreate: Option<u8>,
     pub default: Option<u8>,
     pub comment: Option<String>,
+    #[serde(rename = "groups-overwrite")]
+    pub groups_overwrite: Option<u8>,
+    #[serde(rename = "groups-autocreate")]
+    pub groups_autocreate: Option<u8>,
     #[serde(skip)]
     pub digest: Option<String>,
 }
@@ -470,6 +514,8 @@ mod tests {
             autocreate: Some(true),
             default: Some(true),
             comment: None,
+            groups_autocreate: Some(true),
+            groups_overwrite: Some(true),
         };
 
         let result = client.create_realm(config).await;
@@ -580,6 +626,8 @@ mod tests {
             autocreate: None,
             default: Some(false),
             comment: None,
+            groups_autocreate: None,
+            groups_overwrite: None,
         };
 
         let result = client.update_realm("authentik", config).await;
@@ -611,6 +659,8 @@ mod tests {
             autocreate: None,
             default: None,
             comment: None,
+            groups_autocreate: None,
+            groups_overwrite: None,
         };
 
         let result = client.create_realm(config).await;
