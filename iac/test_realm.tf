@@ -1,14 +1,15 @@
 resource "proxmox_realm" "test_oidc" {
-  realm        = "test-oidc"
+  realm        = "test-groups"
   type         = "openid"
   issuer_url   = "https://auth.example.com"
   client_id    = "proxmox-test"
   client_key   = "super-secret-key"
-  
-  username_claim = "email"
+  username_claim = "username"
   autocreate     = true
   default        = false
-  comment        = "Updated OIDC realm"
+  comment        = "Test realm with group options"
+  groups_overwrite = false
+  groups_autocreate = true
 }
 
 output "realm_name" {

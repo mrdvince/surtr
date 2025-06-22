@@ -69,6 +69,18 @@ impl RealmResource {
                     .optional()
                     .description("Description/comment for the realm"),
             )
+            .attribute(
+                "groups_overwrite",
+                AttributeBuilder::bool("groups_overwrite")
+                    .optional()
+                    .description("Overwrite group membership from authentication provider"),
+            )
+            .attribute(
+                "groups_autocreate",
+                AttributeBuilder::bool("groups_autocreate")
+                    .optional()
+                    .description("Automatically create groups if they don't exist"),
+            )
             .build_resource(0)
     }
 }
@@ -125,6 +137,14 @@ impl Resource for RealmResource {
                 .map(|s| s.to_string()),
             autocreate: config.values.get("autocreate").and_then(|v| v.as_bool()),
             default: config.values.get("default").and_then(|v| v.as_bool()),
+            groups_overwrite: config
+                .values
+                .get("groups_overwrite")
+                .and_then(|v| v.as_bool()),
+            groups_autocreate: config
+                .values
+                .get("groups_autocreate")
+                .and_then(|v| v.as_bool()),
             comment: config
                 .values
                 .get("comment")
@@ -180,6 +200,27 @@ impl Resource for RealmResource {
         }
         if let Some(comment) = config.values.get("comment").and_then(|v| v.as_string()) {
             state_values.insert("comment".to_string(), Dynamic::String(comment.to_string()));
+        }
+
+        if let Some(groups_overwrite) = config
+            .values
+            .get("groups_overwrite")
+            .and_then(|v| v.as_bool())
+        {
+            state_values.insert(
+                "groups_overwrite".to_string(),
+                Dynamic::Bool(groups_overwrite),
+            );
+        }
+        if let Some(groups_autocreate) = config
+            .values
+            .get("groups_autocreate")
+            .and_then(|v| v.as_bool())
+        {
+            state_values.insert(
+                "groups_autocreate".to_string(),
+                Dynamic::Bool(groups_autocreate),
+            );
         }
 
         // Return the created state
@@ -241,6 +282,19 @@ impl Resource for RealmResource {
                     values.insert("comment".to_string(), Dynamic::String(comment));
                 }
 
+                if let Some(groups_overwrite) = info.groups_overwrite {
+                    values.insert(
+                        "groups_overwrite".to_string(),
+                        Dynamic::Bool(groups_overwrite != 0),
+                    );
+                }
+                if let Some(groups_autocreate) = info.groups_autocreate {
+                    values.insert(
+                        "groups_autocreate".to_string(),
+                        Dynamic::Bool(groups_autocreate != 0),
+                    );
+                }
+
                 Ok((Some(State { values }), diags))
             }
             None => Ok((None, diags)), // Resource doesn't exist
@@ -293,6 +347,14 @@ impl Resource for RealmResource {
                 .map(|s| s.to_string()),
             autocreate: config.values.get("autocreate").and_then(|v| v.as_bool()),
             default: config.values.get("default").and_then(|v| v.as_bool()),
+            groups_overwrite: config
+                .values
+                .get("groups_overwrite")
+                .and_then(|v| v.as_bool()),
+            groups_autocreate: config
+                .values
+                .get("groups_autocreate")
+                .and_then(|v| v.as_bool()),
             comment: config
                 .values
                 .get("comment")
