@@ -4,3 +4,5 @@
 .terraformrc
 .env
 iac/Taskfile.yml
+iac/*.tfvars
+iac/.terraform/
