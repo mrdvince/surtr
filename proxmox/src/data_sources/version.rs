@@ -48,13 +48,11 @@ impl DataSource for VersionDataSource {
         // Clone the client to move into the async block
         let client = self.client.clone();
 
-        // Use spawn_blocking to run the async operation in a separate thread
-        let version_info = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-            rt.block_on(async move { client.get_version().await })
+        // Use block_in_place to run the async operation
+        // This avoids spawning new threads which can cause deadlocks
+        let version_info = tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move { client.get_version().await })
         })
-        .join()
-        .expect("Thread panicked")
         .map_err(|e| format!("Failed to get version: {}", e))?;
 
         let mut values = HashMap::new();

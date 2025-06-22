@@ -267,10 +267,24 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
     ) -> std::result::Result<Response<validate_resource_config::Response>, Status> {
         let req = request.into_inner();
         let _type_name = req.type_name;
-        let _config = decode_dynamic_value(&req.config)?;
 
-        // For now, we'll just return success
-        // Real validation would check required fields, types, etc.
+        // Try to decode, but if it fails due to unknowns, just skip validation
+        match decode_dynamic_value(&req.config) {
+            Ok(_config) => {
+                // For now, we'll just return success
+                // Real validation would check required fields, types, etc.
+            }
+            Err(e) => {
+                // If decoding fails, check if it's due to unknown values
+                // In that case, we can't validate yet, so just return success
+                if e.to_string().contains("data did not match any variant") {
+                    eprintln!("DEBUG: Skipping validation due to unknown values in config");
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(Response::new(validate_resource_config::Response {
             diagnostics: vec![],
         }))
@@ -551,17 +565,22 @@ impl<P: Provider + 'static> ProtoProvider for ProviderService<P> {
 
         eprintln!("DEBUG: read_data_source called for {}", type_name);
 
-        let provider = self.provider.lock().unwrap();
-        let data_sources = provider.get_data_sources();
+        // Get the data source and immediately drop the provider lock
+        // This prevents deadlock when data sources spawn threads (e.g., for async operations)
+        // The lock must be released before calling read() to avoid holding it during I/O
+        let data_source = {
+            let provider = self.provider.lock().unwrap();
+            let mut data_sources = provider.get_data_sources();
 
-        eprintln!(
-            "DEBUG: Available data sources: {:?}",
-            data_sources.keys().collect::<Vec<_>>()
-        );
+            eprintln!(
+                "DEBUG: Available data sources: {:?}",
+                data_sources.keys().collect::<Vec<_>>()
+            );
 
-        let data_source = data_sources.get(&type_name).ok_or_else(|| {
-            Status::invalid_argument(format!("Unknown data source: {}", type_name))
-        })?;
+            data_sources.remove(&type_name).ok_or_else(|| {
+                Status::invalid_argument(format!("Unknown data source: {}", type_name))
+            })?
+        }; // Lock is dropped here
 
         eprintln!("DEBUG: Calling read on data source");
 
@@ -714,10 +733,15 @@ fn decode_dynamic_value(value: &Option<DynamicValue>) -> std::result::Result<Con
                         values: HashMap::new(),
                     }),
                     Ok(Some(values)) => Ok(Config { values }),
-                    Err(_) => Err(Status::invalid_argument(format!(
-                        "Failed to decode msgpack: {}",
-                        e
-                    ))),
+                    Err(_) => {
+                        // Log first few bytes to understand what format we're getting
+                        let preview = &value.msgpack[..value.msgpack.len().min(50)];
+                        eprintln!("DEBUG: Unknown msgpack format. First bytes: {:?}", preview);
+                        Err(Status::invalid_argument(format!(
+                            "Failed to decode msgpack: {}",
+                            e
+                        )))
+                    }
                 }
             }
         }

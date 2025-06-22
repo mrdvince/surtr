@@ -162,7 +162,7 @@ impl Resource for RealmResource {
         tracing::debug!("Create realm result: {:?}", create_result);
         create_result.map_err(|e| format!("Failed to create realm: {}", e))?;
 
-        // Build the state with all required attributes
+        // Build the state with all attributes (required and optional)
         let mut state_values = HashMap::new();
 
         // Add all required attributes to state
@@ -181,46 +181,29 @@ impl Resource for RealmResource {
             Dynamic::String(client_key.to_string()),
         );
 
-        // Add optional attributes if present
-        if let Some(username_claim) = config
-            .values
-            .get("username_claim")
-            .and_then(|v| v.as_string())
-        {
-            state_values.insert(
-                "username_claim".to_string(),
-                Dynamic::String(username_claim.to_string()),
-            );
-        }
-        if let Some(autocreate) = config.values.get("autocreate").and_then(|v| v.as_bool()) {
-            state_values.insert("autocreate".to_string(), Dynamic::Bool(autocreate));
-        }
-        if let Some(default) = config.values.get("default").and_then(|v| v.as_bool()) {
-            state_values.insert("default".to_string(), Dynamic::Bool(default));
-        }
-        if let Some(comment) = config.values.get("comment").and_then(|v| v.as_string()) {
-            state_values.insert("comment".to_string(), Dynamic::String(comment.to_string()));
+        // Add optional attributes only if present in config
+        if let Some(username_claim) = config.values.get("username_claim") {
+            state_values.insert("username_claim".to_string(), username_claim.clone());
         }
 
-        if let Some(groups_overwrite) = config
-            .values
-            .get("groups_overwrite")
-            .and_then(|v| v.as_bool())
-        {
-            state_values.insert(
-                "groups_overwrite".to_string(),
-                Dynamic::Bool(groups_overwrite),
-            );
+        if let Some(autocreate) = config.values.get("autocreate") {
+            state_values.insert("autocreate".to_string(), autocreate.clone());
         }
-        if let Some(groups_autocreate) = config
-            .values
-            .get("groups_autocreate")
-            .and_then(|v| v.as_bool())
-        {
-            state_values.insert(
-                "groups_autocreate".to_string(),
-                Dynamic::Bool(groups_autocreate),
-            );
+
+        if let Some(default) = config.values.get("default") {
+            state_values.insert("default".to_string(), default.clone());
+        }
+
+        if let Some(comment) = config.values.get("comment") {
+            state_values.insert("comment".to_string(), comment.clone());
+        }
+
+        if let Some(groups_overwrite) = config.values.get("groups_overwrite") {
+            state_values.insert("groups_overwrite".to_string(), groups_overwrite.clone());
+        }
+
+        if let Some(groups_autocreate) = config.values.get("groups_autocreate") {
+            state_values.insert("groups_autocreate".to_string(), groups_autocreate.clone());
         }
 
         // Return the created state
@@ -263,36 +246,81 @@ impl Resource for RealmResource {
                     values.insert("client_key".to_string(), client_key.clone());
                 }
 
-                if let Some(username_claim) = info.username_claim {
-                    values.insert(
-                        "username_claim".to_string(),
-                        Dynamic::String(username_claim),
-                    );
+                // Add optional attributes - use value from API response or preserve from state
+                // This ensures all schema attributes are present in the returned state
+                match info.username_claim {
+                    Some(username_claim) => {
+                        values.insert(
+                            "username_claim".to_string(),
+                            Dynamic::String(username_claim),
+                        );
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("username_claim") {
+                            values.insert("username_claim".to_string(), v.clone());
+                        }
+                    }
                 }
 
-                if let Some(autocreate) = info.autocreate {
-                    values.insert("autocreate".to_string(), Dynamic::Bool(autocreate != 0));
+                match info.autocreate {
+                    Some(autocreate) => {
+                        values.insert("autocreate".to_string(), Dynamic::Bool(autocreate != 0));
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("autocreate") {
+                            values.insert("autocreate".to_string(), v.clone());
+                        }
+                    }
                 }
 
-                if let Some(default) = info.default {
-                    values.insert("default".to_string(), Dynamic::Bool(default != 0));
+                match info.default {
+                    Some(default) => {
+                        values.insert("default".to_string(), Dynamic::Bool(default != 0));
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("default") {
+                            values.insert("default".to_string(), v.clone());
+                        }
+                    }
                 }
 
-                if let Some(comment) = info.comment {
-                    values.insert("comment".to_string(), Dynamic::String(comment));
+                match info.comment {
+                    Some(comment) => {
+                        values.insert("comment".to_string(), Dynamic::String(comment));
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("comment") {
+                            values.insert("comment".to_string(), v.clone());
+                        }
+                    }
                 }
 
-                if let Some(groups_overwrite) = info.groups_overwrite {
-                    values.insert(
-                        "groups_overwrite".to_string(),
-                        Dynamic::Bool(groups_overwrite != 0),
-                    );
+                match info.groups_overwrite {
+                    Some(groups_overwrite) => {
+                        values.insert(
+                            "groups_overwrite".to_string(),
+                            Dynamic::Bool(groups_overwrite != 0),
+                        );
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("groups_overwrite") {
+                            values.insert("groups_overwrite".to_string(), v.clone());
+                        }
+                    }
                 }
-                if let Some(groups_autocreate) = info.groups_autocreate {
-                    values.insert(
-                        "groups_autocreate".to_string(),
-                        Dynamic::Bool(groups_autocreate != 0),
-                    );
+
+                match info.groups_autocreate {
+                    Some(groups_autocreate) => {
+                        values.insert(
+                            "groups_autocreate".to_string(),
+                            Dynamic::Bool(groups_autocreate != 0),
+                        );
+                    }
+                    None => {
+                        if let Some(v) = state.values.get("groups_autocreate") {
+                            values.insert("groups_autocreate".to_string(), v.clone());
+                        }
+                    }
                 }
 
                 Ok((Some(State { values }), diags))
@@ -371,10 +399,18 @@ impl Resource for RealmResource {
         })
         .map_err(|e| format!("Failed to update realm: {}", e))?;
 
-        // Return the updated state
+        // Return the updated state with all attributes
+        // We need to ensure all schema attributes are present, even if null
+        let mut updated_values = HashMap::new();
+
+        // Copy all values from config, which should already have all attributes
+        for (key, value) in config.values {
+            updated_values.insert(key, value);
+        }
+
         Ok((
             State {
-                values: config.values,
+                values: updated_values,
             },
             diags,
         ))
