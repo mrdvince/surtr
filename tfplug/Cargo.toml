@@ -19,10 +19,14 @@ rmp-serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rustls = { workspace = true }
+regex = "1.11"
+async-trait = "0.1"
 
 [build-dependencies]
 tonic-build = "0.13"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+futures = "0.3"
 

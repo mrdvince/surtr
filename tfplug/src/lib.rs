@@ -1,10 +1,26 @@
+pub mod attribute_type;
+pub mod builders;
+pub mod context;
+pub mod defaults;
 pub mod grpc;
+pub mod plan_modifier;
 pub mod proto;
 pub mod provider;
+pub mod request;
 pub mod schema;
 pub mod types;
+pub mod validator;
 
-pub use provider::{DataSource, Provider, Resource};
+pub use builders::{FluentDataSourceSchemaBuilder, FluentResourceSchemaBuilder, StateBuilder};
+pub use defaults::{
+    Default, DefaultRequest, DefaultResponse, StaticBool, StaticNumber, StaticString,
+};
+pub use grpc::ProviderServer;
+pub use plan_modifier::{
+    PlanModifier, PlanModifyRequest, PlanModifyResponse, RequiresReplaceIfChanged,
+    UseStateForUnknown,
+};
+pub use provider::{DataSourceV2, ProviderV2, ResourceV2};
 pub use schema::{AttributeBuilder, SchemaBuilder};
 pub use types::{Config, Diagnostics, Dynamic, State};
 
@@ -13,6 +29,7 @@ use std::error::Error;
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use rmp_serde::{from_slice, to_vec_named};
@@ -57,6 +74,17 @@ mod tests {
             decoded.values.get("enabled").unwrap().as_bool().unwrap(),
             true
         );
+    }
+
+    #[test]
+    fn dynamic_unknown_serialization() {
+        let unknown = Dynamic::Unknown;
+        let encoded = rmp_serde::to_vec_named(&unknown).unwrap();
+        let decoded: Dynamic = rmp_serde::from_slice(&encoded).unwrap();
+
+        eprintln!("Original: {:?}", unknown);
+        eprintln!("Decoded: {:?}", decoded);
+        eprintln!("Encoded bytes: {:?}", encoded);
     }
 
     #[test]

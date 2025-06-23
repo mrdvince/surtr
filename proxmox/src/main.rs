@@ -1,6 +1,6 @@
 use proxmox::ProxmoxProvider;
 use std::env;
-use tfplug::grpc::ProviderServer;
+use tfplug::ProviderServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -9,7 +9,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let exe_dir = env::current_exe()?.parent().unwrap().to_path_buf();
+    let exe_dir = env::current_exe()?
+        .parent()
+        .ok_or("Failed to get executable directory")?
+        .to_path_buf();
     // TODO: Make TLS optional - only needed for local development
     let cert_path = exe_dir.join("../../certs/localhost+2.pem");
     let key_path = exe_dir.join("../../certs/localhost+2-key.pem");
