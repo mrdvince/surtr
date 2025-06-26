@@ -1,6 +1,7 @@
 # An OpenTofu/Terraform Provider for Proxmox
 
-> ⚠️ This is a learning and experimentantion project to see what is required to write providers in a different language essentially if it can be done and how it would look like.
+> ⚠️ This is a learning and experimentation project to see what is required to write providers in a different language, essentially, if it can be done and what it would look like.
+> ⚠️ DON'T USE THIS, It's not the most consistent thing.
 
 ## Requirements
 
@@ -131,14 +132,14 @@ Planned to add:
 
 ## Written with Claude
 
-This provider was written with the help of Claude. But this wasn't "vibe coded" per se (albeit Claude knows more rust than I do).
+This provider was written with the help of Claude.
 
 Through this project, I learned:
-- How the Terraform Plugin Protocol actually works under the hood
+- How the Terraform Plugin Protocol works under the hood
 - gRPC
-- Refresher on my already "rusty" rust knowhow
-- How/what it's like to "pair" with the LLMs, basiaclly turned reviewer for most of the code (not auto-accepting).
+- Refresher on my already "rusty" rust know-how
+- How/what it's like to "pair" with the LLMs.
 
-"Can you really learn by building with an AI?"
+"Can you learn by building with an AI?"
 
 Yes.
