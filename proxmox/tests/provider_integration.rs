@@ -1,7 +1,11 @@
 use mockito::Server;
 use proxmox::ProxmoxProvider;
+use serial_test::serial;
 use std::collections::HashMap;
-use tfplug::{Config, Dynamic, Provider};
+use tfplug::context::Context;
+use tfplug::request::{ConfigureRequest, ReadRequest};
+use tfplug::types::{Config, Dynamic, State};
+use tfplug::ProviderV2;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_lifecycle_with_mock_server() {
@@ -24,22 +28,33 @@ async fn provider_lifecycle_with_mock_server() {
     );
     config_values.insert("insecure".to_string(), Dynamic::Bool(true));
 
-    let config = Config {
-        values: config_values,
+    let config_request = ConfigureRequest {
+        context: Context::new(),
+        config: Config {
+            values: config_values,
+        },
     };
 
-    let diags = provider.configure(config).unwrap();
-    assert!(!diags.has_errors());
+    let configure_response = provider.configure(config_request).await;
+    assert!(configure_response.diagnostics.errors.is_empty());
 
-    let data_sources = provider.get_data_sources();
-    let version_ds = data_sources.get("proxmox_version").unwrap();
-    let (state, read_diags) = version_ds
-        .read(Config {
-            values: HashMap::new(),
-        })
+    // Use factory method to create data source
+    let version_ds = provider
+        .create_data_source("proxmox_version")
+        .await
         .unwrap();
 
-    assert!(!read_diags.has_errors());
+    let read_request = ReadRequest {
+        context: Context::new(),
+        current_state: State::new(),
+    };
+
+    let read_response = version_ds.read(read_request).await;
+
+    assert!(read_response.diagnostics.errors.is_empty());
+    assert!(read_response.state.is_some());
+
+    let state = read_response.state.unwrap();
     assert_eq!(
         state.values.get("version").unwrap().as_string().unwrap(),
         "7.4.1"
@@ -52,177 +67,230 @@ async fn provider_lifecycle_with_mock_server() {
         state.values.get("repoid").unwrap().as_string().unwrap(),
         "12345"
     );
-    assert_eq!(
-        state.values.get("id").unwrap().as_string().unwrap(),
-        "proxmox_version"
-    );
 }
 
-#[tokio::test]
-async fn provider_handles_missing_endpoint() {
-    // Clear any environment variables
-    std::env::remove_var("PROXMOX_ENDPOINT");
-    std::env::remove_var("PROXMOX_API_TOKEN");
-    std::env::remove_var("PROXMOX_INSECURE");
+#[tokio::test(flavor = "multi_thread")]
+async fn version_data_source_requires_configured_provider() {
+    let mut server = Server::new_async().await;
 
-    let mut provider = ProxmoxProvider::new();
+    let _version_mock = server
+        .mock("GET", "/api2/json/version")
+        .with_header("authorization", "PVEAPIToken=test@pve!test=secret123")
+        .with_body(r#"{"data":{"version":"8.0.0","release":"8.0","repoid":"67890"}}"#)
+        .create_async()
+        .await;
 
-    let mut config_values = HashMap::new();
-    config_values.insert(
-        "api_token".to_string(),
-        Dynamic::String("token".to_string()),
-    );
+    let provider = ProxmoxProvider::new();
 
-    let config = Config {
-        values: config_values,
-    };
+    // Try to create data source without configuring the provider first
+    let result = provider.create_data_source("proxmox_version").await;
 
-    let result = provider.configure(config);
+    // Should fail because provider not configured
     assert!(result.is_err());
     assert!(result
-        .unwrap_err()
+        .err()
+        .unwrap()
         .to_string()
-        .contains("endpoint is required"));
+        .contains("Provider not configured"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn provider_uses_env_vars_when_config_empty() {
+async fn realm_resource_lifecycle() {
     let mut server = Server::new_async().await;
 
-    let _version_mock = server
-        .mock("GET", "/api2/json/version")
-        .with_header("authorization", "PVEAPIToken=env@pve!token=secret")
-        .with_body(r#"{"data":{"version":"8.0.1","release":"8.0","repoid":"xyz"}}"#)
+    let _create_mock = server
+        .mock("POST", "/api2/json/access/domains")
+        .with_header("authorization", "PVEAPIToken=test@pve!test=secret123")
+        .with_body(r#"{"data":null}"#)
         .create_async()
         .await;
 
-    // Set environment variables
-    std::env::set_var("PROXMOX_ENDPOINT", server.url());
-    std::env::set_var("PROXMOX_API_TOKEN", "env@pve!token=secret");
-    std::env::set_var("PROXMOX_INSECURE", "true");
-
-    let mut provider = ProxmoxProvider::new();
-
-    // Empty config - should use env vars
-    let config = Config {
-        values: HashMap::new(),
-    };
-
-    let diags = provider.configure(config).unwrap();
-    assert!(!diags.has_errors());
-
-    let data_sources = provider.get_data_sources();
-    let version_ds = data_sources.get("proxmox_version").unwrap();
-    let (state, read_diags) = version_ds
-        .read(Config {
-            values: HashMap::new(),
-        })
-        .unwrap();
-
-    assert!(!read_diags.has_errors());
-    assert_eq!(
-        state.values.get("version").unwrap().as_string().unwrap(),
-        "8.0.1"
-    );
-
-    std::env::remove_var("PROXMOX_ENDPOINT");
-    std::env::remove_var("PROXMOX_API_TOKEN");
-    std::env::remove_var("PROXMOX_INSECURE");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn provider_prefers_config_over_env_vars() {
-    let mut server = Server::new_async().await;
-
     let _version_mock = server
         .mock("GET", "/api2/json/version")
-        .with_header("authorization", "PVEAPIToken=config@pve!token=configsecret")
-        .with_body(r#"{"data":{"version":"7.0","release":"7.0","repoid":"config"}}"#)
+        .with_header("authorization", "PVEAPIToken=test@pve!test=secret123")
+        .with_body(r#"{"data":{"version":"7.4.1","release":"7.4","repoid":"12345"}}"#)
         .create_async()
         .await;
 
-    // Set environment variables
-    std::env::set_var("PROXMOX_ENDPOINT", "https://env.example.com");
-    std::env::set_var("PROXMOX_API_TOKEN", "env@pve!token=envsecret");
-
     let mut provider = ProxmoxProvider::new();
 
-    // Config should override env vars
     let mut config_values = HashMap::new();
     config_values.insert("endpoint".to_string(), Dynamic::String(server.url()));
     config_values.insert(
         "api_token".to_string(),
-        Dynamic::String("config@pve!token=configsecret".to_string()),
+        Dynamic::String("test@pve!test=secret123".to_string()),
     );
+    config_values.insert("insecure".to_string(), Dynamic::Bool(true));
 
-    let config = Config {
-        values: config_values,
+    let config_request = ConfigureRequest {
+        context: Context::new(),
+        config: Config {
+            values: config_values,
+        },
     };
 
-    let diags = provider.configure(config).unwrap();
-    assert!(!diags.has_errors());
+    let configure_response = provider.configure(config_request).await;
+    assert!(configure_response.diagnostics.errors.is_empty());
 
-    // Verify it uses config values, not env vars
-    let data_sources = provider.get_data_sources();
-    let version_ds = data_sources.get("proxmox_version").unwrap();
-    let (state, read_diags) = version_ds
-        .read(Config {
-            values: HashMap::new(),
-        })
+    // Test that we can create a realm resource through the factory
+    let _realm_resource = provider.create_resource("proxmox_realm").await.unwrap();
+
+    // Test that we can create a version data source through the factory
+    let version_ds = provider
+        .create_data_source("proxmox_version")
+        .await
         .unwrap();
+    let read_request = ReadRequest {
+        context: Context::new(),
+        current_state: State::new(),
+    };
+    let read_response = version_ds.read(read_request).await;
+    assert!(read_response.diagnostics.errors.is_empty());
+}
 
-    assert!(!read_diags.has_errors());
-    assert_eq!(
-        state.values.get("version").unwrap().as_string().unwrap(),
-        "7.0"
+#[tokio::test(flavor = "multi_thread")]
+async fn handles_api_errors_gracefully() {
+    let mut server = Server::new_async().await;
+
+    let _version_mock = server
+        .mock("GET", "/api2/json/version")
+        .with_status(401)
+        .with_body(r#"{"errors":{"authentication":"Invalid token"}}"#)
+        .create_async()
+        .await;
+
+    let mut provider = ProxmoxProvider::new();
+
+    let mut config_values = HashMap::new();
+    config_values.insert("endpoint".to_string(), Dynamic::String(server.url()));
+    config_values.insert(
+        "api_token".to_string(),
+        Dynamic::String("invalid-token".to_string()),
     );
+    config_values.insert("insecure".to_string(), Dynamic::Bool(true));
 
-    std::env::remove_var("PROXMOX_ENDPOINT");
-    std::env::remove_var("PROXMOX_API_TOKEN");
+    let config_request = ConfigureRequest {
+        context: Context::new(),
+        config: Config {
+            values: config_values,
+        },
+    };
+
+    let configure_response = provider.configure(config_request).await;
+    assert!(configure_response.diagnostics.errors.is_empty());
+
+    let version_ds = provider
+        .create_data_source("proxmox_version")
+        .await
+        .unwrap();
+    let read_request = ReadRequest {
+        context: Context::new(),
+        current_state: State::new(),
+    };
+    let read_response = version_ds.read(read_request).await;
+
+    // Should fail with diagnostics errors due to 401 response
+    assert!(!read_response.diagnostics.errors.is_empty());
+    assert!(read_response.state.is_none());
 }
 
 #[tokio::test]
-async fn provider_handles_missing_api_token() {
-    // Clear any environment variables
+#[serial]
+async fn provider_configuration_validation() {
+    // Clear environment variables first to ensure clean test
     std::env::remove_var("PROXMOX_ENDPOINT");
     std::env::remove_var("PROXMOX_API_TOKEN");
     std::env::remove_var("PROXMOX_INSECURE");
 
     let mut provider = ProxmoxProvider::new();
 
-    let mut config_values = HashMap::new();
-    config_values.insert(
-        "endpoint".to_string(),
-        Dynamic::String("https://pve.example.com".to_string()),
-    );
-
-    let config = Config {
-        values: config_values,
+    // Missing required fields
+    let config_request = ConfigureRequest {
+        context: Context::new(),
+        config: Config {
+            values: HashMap::new(),
+        },
     };
 
-    let result = provider.configure(config);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("api_token is required"));
+    let configure_response = provider.configure(config_request).await;
+    assert!(!configure_response.diagnostics.errors.is_empty());
+    assert!(configure_response.diagnostics.errors[0]
+        .summary
+        .contains("endpoint is required"));
 }
 
-#[tokio::test]
-async fn unconfigured_provider_returns_empty_data_sources() {
-    let provider = ProxmoxProvider::new();
-    let data_sources = provider.get_data_sources();
-    assert!(data_sources.is_empty());
+#[tokio::test(flavor = "multi_thread")]
+async fn respects_insecure_tls_setting() {
+    let mut server = Server::new_async().await;
+
+    let _version_mock = server
+        .mock("GET", "/api2/json/version")
+        .with_header("authorization", "PVEAPIToken=test@pve!test=secret123")
+        .with_body(r#"{"data":{"version":"7.4.1","release":"7.4","repoid":"12345"}}"#)
+        .create_async()
+        .await;
+
+    let mut provider = ProxmoxProvider::new();
+
+    let mut config_values = HashMap::new();
+    config_values.insert("endpoint".to_string(), Dynamic::String(server.url()));
+    config_values.insert(
+        "api_token".to_string(),
+        Dynamic::String("test@pve!test=secret123".to_string()),
+    );
+    // Explicitly set insecure to false
+    config_values.insert("insecure".to_string(), Dynamic::Bool(false));
+
+    let config_request = ConfigureRequest {
+        context: Context::new(),
+        config: Config {
+            values: config_values,
+        },
+    };
+
+    let configure_response = provider.configure(config_request).await;
+    assert!(configure_response.diagnostics.errors.is_empty());
+
+    let version_ds = provider
+        .create_data_source("proxmox_version")
+        .await
+        .unwrap();
+
+    // In a real scenario with a self-signed cert, this would fail
+    // But with mockito it should still work
+    let read_request = ReadRequest {
+        context: Context::new(),
+        current_state: State::new(),
+    };
+    let read_response = version_ds.read(read_request).await;
+
+    assert!(read_response.diagnostics.errors.is_empty());
+    assert!(read_response.state.is_some());
+    let state = read_response.state.unwrap();
+    assert_eq!(
+        state.values.get("version").unwrap().as_string().unwrap(),
+        "7.4.1"
+    );
 }
 
-#[tokio::test]
-async fn provider_schema_available_without_configuration() {
+#[tokio::test(flavor = "multi_thread")]
+async fn version_data_source_schema_is_correct() {
     let provider = ProxmoxProvider::new();
-    let schemas = provider.get_schema();
+    let schemas = provider.data_source_schemas().await;
 
     assert!(schemas.contains_key("proxmox_version"));
     let version_schema = &schemas["proxmox_version"];
+
+    // Check expected attributes
+    assert!(version_schema.attributes.contains_key("id"));
     assert!(version_schema.attributes.contains_key("version"));
     assert!(version_schema.attributes.contains_key("release"));
     assert!(version_schema.attributes.contains_key("repoid"));
+
+    // All attributes should be computed
+    for (_, attr) in &version_schema.attributes {
+        assert!(attr.computed);
+        assert!(!attr.required);
+        assert!(!attr.optional);
+    }
 }

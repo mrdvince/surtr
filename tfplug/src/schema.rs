@@ -1,3 +1,4 @@
+use crate::attribute_type::AttributeType;
 use crate::provider::{Attribute, DataSourceSchema, ResourceSchema};
 use std::collections::HashMap;
 
@@ -48,12 +49,15 @@ impl AttributeBuilder {
         Self {
             attribute: Attribute {
                 name: name.into(),
-                r#type: string_type(),
+                r#type: AttributeType::String,
                 description: String::new(),
                 required: false,
                 optional: false,
                 computed: false,
                 sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
             },
         }
     }
@@ -62,12 +66,15 @@ impl AttributeBuilder {
         Self {
             attribute: Attribute {
                 name: name.into(),
-                r#type: number_type(),
+                r#type: AttributeType::Number,
                 description: String::new(),
                 required: false,
                 optional: false,
                 computed: false,
                 sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
             },
         }
     }
@@ -76,12 +83,15 @@ impl AttributeBuilder {
         Self {
             attribute: Attribute {
                 name: name.into(),
-                r#type: bool_type(),
+                r#type: AttributeType::Bool,
                 description: String::new(),
                 required: false,
                 optional: false,
                 computed: false,
                 sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
             },
         }
     }
@@ -113,21 +123,94 @@ impl AttributeBuilder {
         self
     }
 
+    pub fn validator(mut self, validator: Box<dyn crate::validator::Validator>) -> Self {
+        self.attribute.validators.push(validator);
+        self
+    }
+
+    pub fn plan_modifier(mut self, modifier: Box<dyn crate::plan_modifier::PlanModifier>) -> Self {
+        self.attribute.plan_modifiers.push(modifier);
+        self
+    }
+
+    pub fn default(mut self, default: Box<dyn crate::defaults::Default>) -> Self {
+        self.attribute.default = Some(default);
+        self
+    }
+
     pub fn build(self) -> Attribute {
         self.attribute
     }
 }
 
-fn string_type() -> Vec<u8> {
-    "\"string\"".as_bytes().to_vec()
-}
+impl AttributeBuilder {
+    pub fn list(name: impl Into<String>, element_type: AttributeType) -> Self {
+        Self {
+            attribute: Attribute {
+                name: name.into(),
+                r#type: AttributeType::List(Box::new(element_type)),
+                description: String::new(),
+                required: false,
+                optional: false,
+                computed: false,
+                sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
+            },
+        }
+    }
 
-fn number_type() -> Vec<u8> {
-    "\"number\"".as_bytes().to_vec()
-}
+    pub fn set(name: impl Into<String>, element_type: AttributeType) -> Self {
+        Self {
+            attribute: Attribute {
+                name: name.into(),
+                r#type: AttributeType::Set(Box::new(element_type)),
+                description: String::new(),
+                required: false,
+                optional: false,
+                computed: false,
+                sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
+            },
+        }
+    }
 
-fn bool_type() -> Vec<u8> {
-    "\"bool\"".as_bytes().to_vec()
+    pub fn map(name: impl Into<String>, element_type: AttributeType) -> Self {
+        Self {
+            attribute: Attribute {
+                name: name.into(),
+                r#type: AttributeType::Map(Box::new(element_type)),
+                description: String::new(),
+                required: false,
+                optional: false,
+                computed: false,
+                sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
+            },
+        }
+    }
+
+    pub fn object(name: impl Into<String>, attributes: HashMap<String, AttributeType>) -> Self {
+        Self {
+            attribute: Attribute {
+                name: name.into(),
+                r#type: AttributeType::Object(attributes),
+                description: String::new(),
+                required: false,
+                optional: false,
+                computed: false,
+                sensitive: false,
+                validators: vec![],
+                plan_modifiers: vec![],
+                default: None,
+            },
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,8 @@
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "use `?`, `expect()`, `unwrap_or()`, `unwrap_or_else()`, `unwrap_or_default()`, or `if let`. Tests can use #[allow(clippy::disallowed_methods)] for unwrap()." },
+    { path = "std::result::Result::unwrap", reason = "use `?`, `expect()`, `unwrap_or()`, `unwrap_or_else()`, `unwrap_or_default()`, or match. Tests can use #[allow(clippy::disallowed_methods)] for unwrap()." },
+]
+
+msrv = "1.80"
+
+cognitive-complexity-threshold = 15
