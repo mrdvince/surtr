@@ -1,3 +1,3 @@
-pub mod version;
+//! Data source implementations
 
-pub use version::VersionDataSource;
+pub mod data_source_version;

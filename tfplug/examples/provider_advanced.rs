@@ -1,906 +1,1205 @@
-//! Advanced example showing V2 async architecture patterns
+//! Advanced example showing the new tfplug framework API with sophisticated features
+//!
+//! This example demonstrates:
+//! - Multiple resources and data sources
+//! - Provider configuration validation
+//! - Resource import functionality
+//! - Plan modification with replacement detection
+//! - State upgrade from older versions
+//! - Complex schema definitions with validators
+//! - Concurrent operations
 
-use async_trait::async_trait;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tfplug::attribute_type::AttributeType;
-use tfplug::provider::{DataSourceSchema, ResourceSchema};
-use tfplug::request::{DataSourceSchemaResponse, ResourceSchemaResponse, *};
-use tfplug::types::{Config, Diagnostics, Dynamic, State};
-use tfplug::{AttributeBuilder, Result, SchemaBuilder, StateBuilder};
-use tfplug::{DataSourceV2, ProviderV2, ResourceV2};
-use tokio::sync::{RwLock, Semaphore};
-use tokio::time::{timeout, Duration};
+use tfplug::context::Context;
+use tfplug::data_source::{
+    ConfigureDataSourceRequest, ConfigureDataSourceResponse, DataSource, DataSourceMetadataRequest,
+    DataSourceMetadataResponse, DataSourceSchemaRequest, DataSourceSchemaResponse,
+    DataSourceWithConfigure, ReadDataSourceRequest, ReadDataSourceResponse,
+    ValidateDataSourceConfigRequest, ValidateDataSourceConfigResponse,
+};
+use tfplug::defaults::StaticDefault;
+use tfplug::import::import_state_passthrough_id;
+use tfplug::plan_modifier::{RequiresReplace, UseStateForUnknown};
+use tfplug::provider::*;
+use tfplug::resource::{
+    ConfigureResourceRequest, ConfigureResourceResponse, CreateResourceRequest,
+    CreateResourceResponse, DeleteResourceRequest, DeleteResourceResponse,
+    ImportResourceStateRequest, ImportResourceStateResponse, ModifyPlanRequest, ModifyPlanResponse,
+    ReadResourceRequest, ReadResourceResponse, Resource, ResourceMetadataRequest,
+    ResourceMetadataResponse, ResourceSchemaRequest, ResourceSchemaResponse, ResourceWithConfigure,
+    ResourceWithImportState, ResourceWithModifyPlan, ResourceWithUpgradeState,
+    UpdateResourceRequest, UpdateResourceResponse, UpgradeResourceStateRequest,
+    UpgradeResourceStateResponse, ValidateResourceConfigRequest, ValidateResourceConfigResponse,
+};
+use tfplug::schema::AttributeType;
+use tfplug::types::{
+    AttributePath, ClientCapabilities, Diagnostic, Dynamic, DynamicValue, ServerCapabilities,
+};
+use tfplug::validator::{StringLengthValidator, StringOneOfValidator};
+use tfplug::{AttributeBuilder, SchemaBuilder};
+use tokio::sync::RwLock;
 
-// Shared provider configuration with rate limiting and timeout control
+// Shared provider configuration
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ProviderConfig {
     api_endpoint: String,
     api_key: String,
-    max_concurrent_operations: usize,
-    operation_timeout: Duration,
+    environment: String,
 }
 
-// API client with built-in rate limiting and retry logic
+// API client wrapper
 #[derive(Clone)]
 struct ApiClient {
     config: ProviderConfig,
-    semaphore: Arc<Semaphore>,
 }
 
 impl ApiClient {
     fn new(config: ProviderConfig) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_operations));
-        Self { config, semaphore }
+        Self { config }
     }
 
-    async fn execute_with_retry<T, F, Fut>(&self, operation: F) -> Result<T>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        // Acquire rate limiting permit
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|e| format!("Failed to acquire rate limit permit: {}", e))?;
-
-        // Execute with timeout and retry
-        let mut retries = 3;
-        loop {
-            match timeout(self.config.operation_timeout, operation()).await {
-                Ok(Ok(result)) => return Ok(result),
-                Ok(Err(e)) if retries > 0 => {
-                    retries -= 1;
-                    println!(
-                        "Operation failed, retrying... ({} retries left): {}",
-                        retries, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    if retries > 0 {
-                        retries -= 1;
-                        println!(
-                            "Operation timed out, retrying... ({} retries left)",
-                            retries
-                        );
-                    } else {
-                        return Err("Operation timed out after all retries".into());
-                    }
-                }
-            }
-        }
+    async fn create_server(&self, name: &str, size: &str) -> Result<String, String> {
+        // Simulate API call
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        println!(
+            "Creating server '{}' of size '{}' in {}",
+            name, size, self.config.api_endpoint
+        );
+        Ok(format!("srv-{}", uuid::Uuid::new_v4()))
     }
 
-    async fn create_resource(&self, resource_type: &str, name: &str) -> Result<String> {
-        self.execute_with_retry(|| async {
-            // Use api_endpoint and api_key for realistic API simulation
-            let url = format!("{}/api/v1/{}", self.config.api_endpoint, resource_type);
-            println!("Creating {} '{}' at endpoint: {}", resource_type, name, url);
-            println!("Using API key: {}...", &self.config.api_key[..8]);
+    async fn get_server(&self, id: &str) -> Result<Option<ServerInfo>, String> {
+        // Simulate API call
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        Ok(Some(ServerInfo {
+            id: id.to_string(),
+            name: "test-server".to_string(),
+            size: "medium".to_string(),
+            status: "running".to_string(),
+            ip_address: "10.0.0.1".to_string(),
+        }))
+    }
 
-            // Simulate API call
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok(format!(
-                "{}-{}-{}",
-                resource_type,
-                name,
-                uuid::Uuid::new_v4()
-            ))
+    async fn update_server(&self, id: &str, name: &str, size: &str) -> Result<(), String> {
+        // Simulate API call
+        println!("Updating server '{}': name='{}', size='{}'", id, name, size);
+        Ok(())
+    }
+
+    async fn delete_server(&self, id: &str) -> Result<(), String> {
+        // Simulate API call
+        println!("Deleting server '{}'", id);
+        Ok(())
+    }
+
+    async fn get_zone_info(&self, zone: &str) -> Result<ZoneInfo, String> {
+        // Simulate API call
+        Ok(ZoneInfo {
+            zone: zone.to_string(),
+            region: "us-east".to_string(),
+            available_sizes: vec!["small", "medium", "large"],
         })
-        .await
-    }
-
-    async fn get_resource(&self, id: &str) -> Result<Option<HashMap<String, String>>> {
-        self.execute_with_retry(|| async {
-            // Use api_endpoint and api_key for realistic API simulation
-            let url = format!("{}/api/v1/resources/{}", self.config.api_endpoint, id);
-            println!("Reading resource '{}' from endpoint: {}", id, url);
-            println!(
-                "Authenticating with API key: {}...",
-                &self.config.api_key[..8]
-            );
-
-            // Simulate API call
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let mut data = HashMap::new();
-            data.insert("id".to_string(), id.to_string());
-            data.insert("status".to_string(), "active".to_string());
-            Ok(Some(data))
-        })
-        .await
-    }
-
-    async fn delete_resource(&self, id: &str) -> Result<()> {
-        self.execute_with_retry(|| async {
-            // Use api_endpoint and api_key for realistic API simulation
-            let url = format!("{}/api/v1/resources/{}", self.config.api_endpoint, id);
-            println!("Deleting resource '{}' at endpoint: {}", id, url);
-            println!(
-                "Authenticating with API key: {}...",
-                &self.config.api_key[..8]
-            );
-
-            // Simulate API call
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            println!("Successfully deleted resource: {}", id);
-            Ok(())
-        })
-        .await
-    }
-
-    async fn list_servers(&self, filter: Option<&str>) -> Result<Vec<HashMap<String, String>>> {
-        self.execute_with_retry(|| async {
-            // Use api_endpoint and api_key for realistic API simulation
-            let mut url = format!("{}/api/v1/servers", self.config.api_endpoint);
-            if let Some(f) = filter {
-                url = format!("{}?filter={}", url, f);
-            }
-            println!("Listing servers from endpoint: {}", url);
-            println!(
-                "Authenticating with API key: {}...",
-                &self.config.api_key[..8]
-            );
-
-            // Simulate API call
-            tokio::time::sleep(Duration::from_millis(60)).await;
-
-            let mut servers = vec![];
-            for i in 0..5 {
-                let server_name = format!("Server {}", i);
-                if let Some(f) = filter {
-                    if !server_name.contains(f) {
-                        continue;
-                    }
-                }
-
-                let mut server = HashMap::new();
-                server.insert("id".to_string(), format!("server-{}", i));
-                server.insert("name".to_string(), server_name);
-                server.insert("status".to_string(), "active".to_string());
-                server.insert("cpu_count".to_string(), format!("{}", 2 + i));
-                servers.push(server);
-            }
-
-            Ok(servers)
-        })
-        .await
     }
 }
 
-// Advanced provider with sophisticated configuration
+#[allow(dead_code)]
+struct ServerInfo {
+    id: String,
+    name: String,
+    size: String,
+    status: String,
+    ip_address: String,
+}
+
+struct ZoneInfo {
+    zone: String,
+    region: String,
+    available_sizes: Vec<&'static str>,
+}
+
+// Provider implementation
 struct AdvancedProvider {
     client: Arc<RwLock<Option<ApiClient>>>,
-    resource_schemas: HashMap<String, ResourceSchema>,
-    data_source_schemas: HashMap<String, DataSourceSchema>,
 }
 
 impl AdvancedProvider {
     fn new() -> Self {
-        let mut resource_schemas = HashMap::new();
-
-        // Define multiple resource types with different schemas
-        resource_schemas.insert(
-            "advanced_server".to_string(),
-            SchemaBuilder::new()
-                .attribute(
-                    "name",
-                    AttributeBuilder::string("name")
-                        .required()
-                        .description("Server name"),
-                )
-                .attribute(
-                    "size",
-                    AttributeBuilder::string("size")
-                        .required()
-                        .description("Server size (small, medium, large)"), // .validator(|value| {
-                                                                            //     match value.as_str() {
-                                                                            //         "small" | "medium" | "large" => Ok(()),
-                                                                            //         _ => Err("Size must be small, medium, or large".into()),
-                                                                            //     }
-                                                                            // }),
-                )
-                .attribute(
-                    "id",
-                    AttributeBuilder::string("id")
-                        .computed()
-                        .description("Server ID"),
-                )
-                .attribute(
-                    "status",
-                    AttributeBuilder::string("status")
-                        .computed()
-                        .description("Server status"),
-                )
-                .build_resource(1),
-        );
-
-        resource_schemas.insert(
-            "advanced_network".to_string(),
-            SchemaBuilder::new()
-                .attribute(
-                    "name",
-                    AttributeBuilder::string("name")
-                        .required()
-                        .description("Network name"),
-                )
-                .attribute(
-                    "cidr",
-                    AttributeBuilder::string("cidr")
-                        .required()
-                        .description("Network CIDR block"),
-                )
-                .attribute(
-                    "id",
-                    AttributeBuilder::string("id")
-                        .computed()
-                        .description("Network ID"),
-                )
-                .build_resource(1),
-        );
-
-        let mut data_source_schemas = HashMap::new();
-        data_source_schemas.insert(
-            "server_list".to_string(),
-            SchemaBuilder::new()
-                .attribute(
-                    "filter",
-                    AttributeBuilder::string("filter")
-                        .optional()
-                        .description("Filter expression"),
-                )
-                .attribute(
-                    "servers",
-                    AttributeBuilder::list(
-                        "servers",
-                        AttributeType::Map(Box::new(AttributeType::String)),
-                    )
-                    .computed()
-                    .description("List of servers"),
-                )
-                .build_data_source(1),
-        );
-
         Self {
             client: Arc::new(RwLock::new(None)),
-            resource_schemas,
-            data_source_schemas,
         }
     }
 }
 
-#[async_trait]
-impl ProviderV2 for AdvancedProvider {
-    async fn configure(&mut self, request: ConfigureRequest) -> ConfigureResponse {
-        let mut diagnostics = Diagnostics::new();
+#[async_trait::async_trait]
+impl Provider for AdvancedProvider {
+    fn type_name(&self) -> &'static str {
+        "advanced"
+    }
 
-        let endpoint = match request.config.get_string("endpoint") {
-            Some(e) => e,
-            None => {
-                diagnostics.add_error("endpoint is required", None::<String>);
-                return ConfigureResponse { diagnostics };
+    async fn metadata(
+        &self,
+        _ctx: Context,
+        _request: ProviderMetadataRequest,
+    ) -> ProviderMetadataResponse {
+        ProviderMetadataResponse {
+            type_name: self.type_name().to_string(),
+            server_capabilities: ServerCapabilities {
+                plan_destroy: true,
+                get_provider_schema_optional: false,
+                move_resource_state: true,
+            },
+        }
+    }
+
+    async fn meta_schema(
+        &self,
+        _ctx: Context,
+        _request: ProviderMetaSchemaRequest,
+    ) -> ProviderMetaSchemaResponse {
+        ProviderMetaSchemaResponse {
+            schema: None,
+            diagnostics: vec![],
+        }
+    }
+
+    async fn schema(
+        &self,
+        _ctx: Context,
+        _request: ProviderSchemaRequest,
+    ) -> ProviderSchemaResponse {
+        let schema = SchemaBuilder::new()
+            .attribute(
+                AttributeBuilder::new("endpoint", AttributeType::String)
+                    .required()
+                    .description("API endpoint URL")
+                    .validator(StringLengthValidator::min(5))
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("api_key", AttributeType::String)
+                    .required()
+                    .description("API authentication key")
+                    .sensitive()
+                    .validator(StringLengthValidator::between(32, 32))
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("environment", AttributeType::String)
+                    .optional()
+                    .description("Deployment environment")
+                    .default(StaticDefault::string("production"))
+                    .validator(StringOneOfValidator::create(vec![
+                        "development".to_string(),
+                        "staging".to_string(),
+                        "production".to_string(),
+                    ]))
+                    .build(),
+            )
+            .build();
+
+        ProviderSchemaResponse {
+            schema,
+            diagnostics: vec![],
+        }
+    }
+
+    async fn configure(
+        &mut self,
+        _ctx: Context,
+        request: ConfigureProviderRequest,
+    ) -> ConfigureProviderResponse {
+        let mut diagnostics = vec![];
+
+        // Extract configuration
+        let endpoint = match request.config.get_string(&AttributePath::new("endpoint")) {
+            Ok(e) => e,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    "Invalid endpoint",
+                    format!("Failed to get endpoint: {}", e),
+                ));
+                return ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: None,
+                };
             }
         };
 
-        let api_key = match request.config.get_string("api_key") {
-            Some(k) => k,
-            None => {
-                diagnostics.add_error("api_key is required", None::<String>);
-                return ConfigureResponse { diagnostics };
+        let api_key = match request.config.get_string(&AttributePath::new("api_key")) {
+            Ok(k) => k,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    "Invalid API key",
+                    format!("Failed to get API key: {}", e),
+                ));
+                return ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: None,
+                };
             }
         };
 
-        let max_concurrent = request
+        let environment = request
             .config
-            .get_number("max_concurrent_operations")
-            .unwrap_or(10.0) as usize;
+            .get_string(&AttributePath::new("environment"))
+            .unwrap_or_else(|_| "production".to_string());
 
-        let timeout_ms = request
-            .config
-            .get_number("operation_timeout_ms")
-            .unwrap_or(5000.0) as u64;
+        // Additional validation
+        if environment == "production" && !endpoint.starts_with("https://") {
+            diagnostics.push(Diagnostic::warning(
+                "Insecure endpoint",
+                "Production environment should use HTTPS",
+            ));
+        }
 
+        // Create and store the client
         let config = ProviderConfig {
             api_endpoint: endpoint,
             api_key,
-            max_concurrent_operations: max_concurrent,
-            operation_timeout: Duration::from_millis(timeout_ms),
+            environment,
         };
-
         let client = ApiClient::new(config);
-        let mut client_lock = self.client.write().await;
-        *client_lock = Some(client);
+        *self.client.write().await = Some(client.clone());
 
-        ConfigureResponse { diagnostics }
-    }
-
-    async fn create_resource(&self, name: &str) -> Result<Box<dyn ResourceV2>> {
-        match name {
-            "advanced_server" => Ok(Box::new(ServerResource::new(self.client.clone()))),
-            "advanced_network" => Ok(Box::new(NetworkResource::new(self.client.clone()))),
-            _ => Err(format!("Unknown resource: {}", name).into()),
+        ConfigureProviderResponse {
+            diagnostics,
+            provider_data: Some(Arc::new(client) as Arc<dyn Any + Send + Sync>),
         }
     }
 
-    async fn create_data_source(&self, name: &str) -> Result<Box<dyn DataSourceV2>> {
-        match name {
-            "server_list" => Ok(Box::new(ServerListDataSource::new(self.client.clone()))),
-            _ => Err(format!("Unknown data source: {}", name).into()),
+    async fn validate(
+        &self,
+        _ctx: Context,
+        request: ValidateProviderConfigRequest,
+    ) -> ValidateProviderConfigResponse {
+        let mut diagnostics = vec![];
+
+        // Custom validation beyond schema validation
+        if let Ok(endpoint) = request.config.get_string(&AttributePath::new("endpoint")) {
+            if endpoint.contains("localhost") {
+                if let Ok(env) = request
+                    .config
+                    .get_string(&AttributePath::new("environment"))
+                {
+                    if env == "production" {
+                        diagnostics.push(Diagnostic::error(
+                            "Invalid configuration",
+                            "Cannot use localhost endpoint in production environment",
+                        ));
+                    }
+                }
+            }
         }
+
+        ValidateProviderConfigResponse { diagnostics }
     }
 
-    async fn resource_schemas(&self) -> HashMap<String, ResourceSchema> {
-        self.resource_schemas.clone()
+    async fn stop(&self, _ctx: Context, _request: StopProviderRequest) -> StopProviderResponse {
+        // Clean up any resources
+        *self.client.write().await = None;
+        StopProviderResponse { error: None }
     }
 
-    async fn data_source_schemas(&self) -> HashMap<String, DataSourceSchema> {
-        self.data_source_schemas.clone()
+    fn resources(&self) -> HashMap<String, ResourceFactory> {
+        let mut resources = HashMap::new();
+
+        resources.insert(
+            "advanced_server".to_string(),
+            Box::new(|| Box::new(ServerResource::new()) as Box<dyn ResourceWithConfigure>)
+                as ResourceFactory,
+        );
+
+        resources
+    }
+
+    fn data_sources(&self) -> HashMap<String, DataSourceFactory> {
+        let mut data_sources = HashMap::new();
+
+        data_sources.insert(
+            "advanced_zone".to_string(),
+            Box::new(|| Box::new(ZoneDataSource::new()) as Box<dyn DataSourceWithConfigure>)
+                as DataSourceFactory,
+        );
+
+        data_sources
     }
 }
 
 // Server resource with advanced features
 struct ServerResource {
-    client: Arc<RwLock<Option<ApiClient>>>,
+    client: Option<ApiClient>,
 }
 
 impl ServerResource {
-    fn new(client: Arc<RwLock<Option<ApiClient>>>) -> Self {
-        Self { client }
-    }
-
-    async fn get_client(&self) -> Result<ApiClient> {
-        self.client
-            .read()
-            .await
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Provider not configured".into())
+    fn new() -> Self {
+        Self { client: None }
     }
 }
 
-#[async_trait]
-impl ResourceV2 for ServerResource {
-    async fn schema(&self, _: SchemaRequest) -> ResourceSchemaResponse {
-        ResourceSchemaResponse {
-            schema: ResourceSchema {
-                version: 1,
-                attributes: HashMap::new(),
-            },
-            diagnostics: Diagnostics::new(),
+#[async_trait::async_trait]
+impl Resource for ServerResource {
+    fn type_name(&self) -> &'static str {
+        "advanced_server"
+    }
+
+    async fn metadata(
+        &self,
+        _ctx: Context,
+        _request: ResourceMetadataRequest,
+    ) -> ResourceMetadataResponse {
+        ResourceMetadataResponse {
+            type_name: self.type_name().to_string(),
         }
     }
 
-    async fn create(&self, request: CreateRequest) -> CreateResponse {
-        let mut diagnostics = Diagnostics::new();
+    async fn validate(
+        &self,
+        _ctx: Context,
+        _request: ValidateResourceConfigRequest,
+    ) -> ValidateResourceConfigResponse {
+        ValidateResourceConfigResponse {
+            diagnostics: vec![],
+        }
+    }
 
-        let client = match self.get_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                diagnostics.add_error("Failed to get client", Some(&e.to_string()));
-                return CreateResponse {
-                    state: request.planned_state,
+    async fn schema(
+        &self,
+        _ctx: Context,
+        _request: ResourceSchemaRequest,
+    ) -> ResourceSchemaResponse {
+        let schema = SchemaBuilder::new()
+            .attribute(
+                AttributeBuilder::new("name", AttributeType::String)
+                    .required()
+                    .description("Server name")
+                    .validator(StringLengthValidator::between(3, 63))
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("size", AttributeType::String)
+                    .required()
+                    .description("Server size")
+                    .validator(StringOneOfValidator::create(vec![
+                        "small".to_string(),
+                        "medium".to_string(),
+                        "large".to_string(),
+                    ]))
+                    .plan_modifier(RequiresReplace::create())
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("id", AttributeType::String)
+                    .computed()
+                    .description("Server ID")
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("status", AttributeType::String)
+                    .computed()
+                    .description("Server status")
+                    .plan_modifier(UseStateForUnknown::create())
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("ip_address", AttributeType::String)
+                    .computed()
+                    .description("Server IP address")
+                    .plan_modifier(UseStateForUnknown::create())
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("tags", AttributeType::Map(Box::new(AttributeType::String)))
+                    .optional()
+                    .description("Server tags")
+                    .build(),
+            )
+            .build();
+
+        ResourceSchemaResponse {
+            schema,
+            diagnostics: vec![],
+        }
+    }
+
+    async fn create(
+        &self,
+        _ctx: Context,
+        request: CreateResourceRequest,
+    ) -> CreateResourceResponse {
+        let mut diagnostics = vec![];
+
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                diagnostics.push(Diagnostic::error("Provider not configured", ""));
+                return CreateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
                     diagnostics,
                 };
             }
         };
 
-        let name = match request.config.require_string("name") {
+        let name = match request.config.get_string(&AttributePath::new("name")) {
             Ok(n) => n,
             Err(e) => {
-                diagnostics.add_error("name is required", Some(&e.to_string()));
-                return CreateResponse {
-                    state: request.planned_state,
+                diagnostics.push(Diagnostic::error("Invalid name", e.to_string()));
+                return CreateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
                     diagnostics,
                 };
             }
         };
 
-        match client.create_resource("server", &name).await {
+        let size = match request.config.get_string(&AttributePath::new("size")) {
+            Ok(s) => s,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Invalid size", e.to_string()));
+                return CreateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
+                    diagnostics,
+                };
+            }
+        };
+
+        // Create the server
+        match client.create_server(&name, &size).await {
             Ok(id) => {
-                let state = StateBuilder::from_config(&request.config)
-                    .string("id", &id)
-                    .string("status", "provisioning")
-                    .build();
-                CreateResponse { state, diagnostics }
+                let mut state = request.planned_state.clone();
+                state
+                    .set_string(&AttributePath::new("id"), id.clone())
+                    .unwrap();
+                state
+                    .set_string(&AttributePath::new("status"), "creating".to_string())
+                    .unwrap();
+
+                CreateResourceResponse {
+                    new_state: state,
+                    private: request.planned_private,
+                    diagnostics,
+                }
             }
             Err(e) => {
-                diagnostics.add_error("Failed to create server", Some(&e.to_string()));
-                CreateResponse {
-                    state: request.planned_state,
+                diagnostics.push(Diagnostic::error("Failed to create server", e));
+                CreateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
                     diagnostics,
                 }
             }
         }
     }
 
-    async fn read(&self, request: ReadRequest) -> ReadResponse {
-        let mut diagnostics = Diagnostics::new();
+    async fn read(&self, _ctx: Context, request: ReadResourceRequest) -> ReadResourceResponse {
+        let mut diagnostics = vec![];
 
-        let client = match self.get_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                diagnostics.add_error("Failed to get client", Some(&e.to_string()));
-                return ReadResponse {
-                    state: None,
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                return ReadResourceResponse {
+                    new_state: None,
+                    private: request.private,
                     diagnostics,
+                    deferred: None,
+                    new_identity: None,
                 };
             }
         };
 
-        let id = match request.current_state.require_string("id") {
+        let id = match request.current_state.get_string(&AttributePath::new("id")) {
             Ok(id) => id,
-            Err(e) => {
-                diagnostics.add_error("id is required", Some(&e.to_string()));
-                return ReadResponse {
-                    state: None,
+            Err(_) => {
+                return ReadResourceResponse {
+                    new_state: None,
+                    private: request.private,
                     diagnostics,
+                    deferred: None,
+                    new_identity: None,
                 };
             }
         };
 
-        match client.get_resource(&id).await {
-            Ok(Some(data)) => {
+        match client.get_server(&id).await {
+            Ok(Some(info)) => {
                 let mut state = request.current_state.clone();
-                if let Some(status) = data.get("status") {
-                    state
-                        .values
-                        .insert("status".to_string(), Dynamic::String(status.clone()));
-                }
-                ReadResponse {
-                    state: Some(state),
+                state
+                    .set_string(&AttributePath::new("name"), info.name)
+                    .unwrap();
+                state
+                    .set_string(&AttributePath::new("size"), info.size)
+                    .unwrap();
+                state
+                    .set_string(&AttributePath::new("status"), info.status)
+                    .unwrap();
+                state
+                    .set_string(&AttributePath::new("ip_address"), info.ip_address)
+                    .unwrap();
+
+                ReadResourceResponse {
+                    new_state: Some(state),
+                    private: request.private,
                     diagnostics,
+                    deferred: None,
+                    new_identity: None,
                 }
             }
-            Ok(None) => ReadResponse {
-                state: None,
+            Ok(None) => ReadResourceResponse {
+                new_state: None,
+                private: request.private,
                 diagnostics,
+                deferred: None,
+                new_identity: None,
             },
             Err(e) => {
-                diagnostics.add_error("Failed to read server", Some(&e.to_string()));
-                ReadResponse {
-                    state: Some(request.current_state),
+                diagnostics.push(Diagnostic::error("Failed to read server", e));
+                ReadResourceResponse {
+                    new_state: Some(request.current_state),
+                    private: request.private,
                     diagnostics,
+                    deferred: None,
+                    new_identity: None,
                 }
             }
         }
     }
 
-    async fn update(&self, request: UpdateRequest) -> UpdateResponse {
-        UpdateResponse {
-            state: request.planned_state,
-            diagnostics: Diagnostics::new(),
-        }
-    }
+    async fn update(
+        &self,
+        _ctx: Context,
+        request: UpdateResourceRequest,
+    ) -> UpdateResourceResponse {
+        let mut diagnostics = vec![];
 
-    async fn delete(&self, request: DeleteRequest) -> DeleteResponse {
-        let mut diagnostics = Diagnostics::new();
-
-        let client = match self.get_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                diagnostics.add_error("Failed to get client", Some(&e.to_string()));
-                return DeleteResponse { diagnostics };
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                diagnostics.push(Diagnostic::error("Provider not configured", ""));
+                return UpdateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
+                    diagnostics,
+                    new_identity: None,
+                };
             }
         };
 
-        let id = match request.current_state.require_string("id") {
+        let id = match request.prior_state.get_string(&AttributePath::new("id")) {
             Ok(id) => id,
             Err(e) => {
-                diagnostics.add_error("id is required", Some(&e.to_string()));
-                return DeleteResponse { diagnostics };
+                diagnostics.push(Diagnostic::error("Invalid ID", e.to_string()));
+                return UpdateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
+                    diagnostics,
+                    new_identity: None,
+                };
             }
         };
 
-        if let Err(e) = client.delete_resource(&id).await {
-            diagnostics.add_error("Failed to delete server", Some(&e.to_string()));
-        }
+        let name = match request.config.get_string(&AttributePath::new("name")) {
+            Ok(n) => n,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Invalid name", e.to_string()));
+                return UpdateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
+                    diagnostics,
+                    new_identity: None,
+                };
+            }
+        };
 
-        DeleteResponse { diagnostics }
-    }
-}
+        let size = match request.config.get_string(&AttributePath::new("size")) {
+            Ok(s) => s,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Invalid size", e.to_string()));
+                return UpdateResourceResponse {
+                    new_state: request.planned_state,
+                    private: request.planned_private,
+                    diagnostics,
+                    new_identity: None,
+                };
+            }
+        };
 
-// Network resource
-struct NetworkResource {
-    client: Arc<RwLock<Option<ApiClient>>>,
-}
-
-impl NetworkResource {
-    fn new(client: Arc<RwLock<Option<ApiClient>>>) -> Self {
-        Self { client }
-    }
-}
-
-#[async_trait]
-impl ResourceV2 for NetworkResource {
-    async fn schema(&self, _: SchemaRequest) -> ResourceSchemaResponse {
-        ResourceSchemaResponse {
-            schema: ResourceSchema {
-                version: 1,
-                attributes: HashMap::new(),
+        match client.update_server(&id, &name, &size).await {
+            Ok(()) => UpdateResourceResponse {
+                new_state: request.planned_state,
+                private: request.planned_private,
+                diagnostics,
+                new_identity: None,
             },
-            diagnostics: Diagnostics::new(),
-        }
-    }
-
-    async fn create(&self, request: CreateRequest) -> CreateResponse {
-        let mut diagnostics = Diagnostics::new();
-
-        // Get client and use it to create the network resource
-        let client_guard = self.client.read().await;
-        if let Some(client) = client_guard.as_ref() {
-            // Extract network name from config
-            let name = request
-                .config
-                .get_string("name")
-                .unwrap_or_else(|| format!("network-{}", uuid::Uuid::new_v4()));
-
-            match client.create_resource("networks", &name).await {
-                Ok(resource_id) => {
-                    let state = StateBuilder::from_config(&request.config)
-                        .string("id", &resource_id)
-                        .string("name", &name)
-                        .build();
-                    CreateResponse { state, diagnostics }
-                }
-                Err(e) => {
-                    diagnostics
-                        .add_error(format!("Failed to create network: {}", e), None::<String>);
-                    CreateResponse {
-                        state: State::new(),
-                        diagnostics,
-                    }
-                }
-            }
-        } else {
-            diagnostics.add_error("Provider not configured".to_string(), None::<String>);
-            CreateResponse {
-                state: State::new(),
-                diagnostics,
-            }
-        }
-    }
-
-    async fn read(&self, request: ReadRequest) -> ReadResponse {
-        let mut diagnostics = Diagnostics::new();
-
-        // Get client and use it to read the network resource
-        let client_guard = self.client.read().await;
-        if let Some(client) = client_guard.as_ref() {
-            if let Some(id) = request.current_state.get_string("id") {
-                match client.get_resource(&id).await {
-                    Ok(Some(resource_data)) => {
-                        // Update state with fresh data from API
-                        let mut state = request.current_state;
-                        for (key, value) in resource_data {
-                            state.values.insert(key, Dynamic::String(value));
-                        }
-                        ReadResponse {
-                            state: Some(state),
-                            diagnostics,
-                        }
-                    }
-                    Ok(None) => {
-                        // Resource no longer exists
-                        ReadResponse {
-                            state: None,
-                            diagnostics,
-                        }
-                    }
-                    Err(e) => {
-                        diagnostics
-                            .add_error(format!("Failed to read network: {}", e), None::<String>);
-                        ReadResponse {
-                            state: Some(request.current_state),
-                            diagnostics,
-                        }
-                    }
-                }
-            } else {
-                diagnostics.add_error("Network ID not found in state".to_string(), None::<String>);
-                ReadResponse {
-                    state: None,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Failed to update server", e));
+                UpdateResourceResponse {
+                    new_state: request.prior_state,
+                    private: request.planned_private,
                     diagnostics,
+                    new_identity: None,
                 }
             }
-        } else {
-            diagnostics.add_error("Provider not configured".to_string(), None::<String>);
-            ReadResponse {
-                state: Some(request.current_state),
+        }
+    }
+
+    async fn delete(
+        &self,
+        _ctx: Context,
+        request: DeleteResourceRequest,
+    ) -> DeleteResourceResponse {
+        let mut diagnostics = vec![];
+
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                return DeleteResourceResponse { diagnostics };
+            }
+        };
+
+        let id = match request.prior_state.get_string(&AttributePath::new("id")) {
+            Ok(id) => id,
+            Err(_) => {
+                return DeleteResourceResponse { diagnostics };
+            }
+        };
+
+        if let Err(e) = client.delete_server(&id).await {
+            diagnostics.push(Diagnostic::error("Failed to delete server", e));
+        }
+
+        DeleteResourceResponse { diagnostics }
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceWithConfigure for ServerResource {
+    async fn configure(
+        &mut self,
+        _ctx: Context,
+        request: ConfigureResourceRequest,
+    ) -> ConfigureResourceResponse {
+        if let Some(data) = request.provider_data {
+            if let Ok(client) = data.downcast::<ApiClient>() {
+                self.client = Some((*client).clone());
+            }
+        }
+        ConfigureResourceResponse {
+            diagnostics: vec![],
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceWithImportState for ServerResource {
+    async fn import_state(
+        &self,
+        ctx: Context,
+        request: ImportResourceStateRequest,
+    ) -> ImportResourceStateResponse {
+        let mut response = ImportResourceStateResponse {
+            imported_resources: vec![],
+            diagnostics: vec![],
+            deferred: None,
+        };
+
+        import_state_passthrough_id(&ctx, AttributePath::new("id"), &request, &mut response);
+
+        response
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceWithModifyPlan for ServerResource {
+    async fn modify_plan(&self, _ctx: Context, request: ModifyPlanRequest) -> ModifyPlanResponse {
+        let mut diagnostics = vec![];
+        let mut requires_replace = vec![];
+
+        // Custom logic: changing to "large" size from "small" requires replace
+        if let (Ok(current_size), Ok(planned_size)) = (
+            request.prior_state.get_string(&AttributePath::new("size")),
+            request
+                .proposed_new_state
+                .get_string(&AttributePath::new("size")),
+        ) {
+            if current_size == "small" && planned_size == "large" {
+                requires_replace.push(AttributePath::new("size"));
+                diagnostics.push(Diagnostic::warning(
+                    "Server replacement required",
+                    "Upgrading directly from small to large requires server replacement",
+                ));
+            }
+        }
+
+        ModifyPlanResponse {
+            planned_state: request.proposed_new_state,
+            requires_replace,
+            planned_private: request.prior_private,
+            diagnostics,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceWithUpgradeState for ServerResource {
+    async fn upgrade_state(
+        &self,
+        _ctx: Context,
+        request: UpgradeResourceStateRequest,
+    ) -> UpgradeResourceStateResponse {
+        let diagnostics = vec![];
+
+        // Example: upgrade from version 0 to version 1
+        // Version 0 had "instance_size", version 1 has "size"
+        if request.version == 0 {
+            // For this example, we'll create a new upgraded state
+            let mut upgraded = DynamicValue::new(Dynamic::Map(HashMap::new()));
+
+            // In a real implementation, you would parse request.raw_state and migrate fields
+            // For this example, we'll just show the pattern with expected fields
+            upgraded
+                .set_string(&AttributePath::new("size"), "medium".to_string())
+                .unwrap();
+            upgraded
+                .set_string(&AttributePath::new("id"), "srv-12345".to_string())
+                .unwrap();
+            upgraded
+                .set_string(&AttributePath::new("name"), "upgraded-server".to_string())
+                .unwrap();
+            upgraded
+                .set_string(&AttributePath::new("status"), "running".to_string())
+                .unwrap();
+            upgraded
+                .set_string(&AttributePath::new("ip_address"), "10.0.0.1".to_string())
+                .unwrap();
+
+            return UpgradeResourceStateResponse {
+                upgraded_state: upgraded,
                 diagnostics,
-            }
+            };
         }
-    }
 
-    async fn update(&self, request: UpdateRequest) -> UpdateResponse {
-        let mut diagnostics = Diagnostics::new();
-
-        // Get client and use it to update the network resource
-        let client_guard = self.client.read().await;
-        if let Some(client) = client_guard.as_ref() {
-            if let Some(id) = request.current_state.get_string("id") {
-                // In a real implementation, you would extract changes and call an update API
-                // For this example, we'll simulate success and return the planned state
-                println!("Updating network {} using client", id);
-
-                // Simulate using the client for update operations
-                match client.get_resource(&id).await {
-                    Ok(Some(_)) => {
-                        // Resource exists, proceed with update
-                        UpdateResponse {
-                            state: request.planned_state,
-                            diagnostics,
-                        }
-                    }
-                    Ok(None) => {
-                        diagnostics.add_error(
-                            "Network resource not found for update".to_string(),
-                            None::<String>,
-                        );
-                        UpdateResponse {
-                            state: request.current_state,
-                            diagnostics,
-                        }
-                    }
-                    Err(e) => {
-                        diagnostics.add_error(
-                            format!("Failed to verify network for update: {}", e),
-                            None::<String>,
-                        );
-                        UpdateResponse {
-                            state: request.current_state,
-                            diagnostics,
-                        }
-                    }
-                }
-            } else {
-                diagnostics.add_error("Network ID not found in state".to_string(), None::<String>);
-                UpdateResponse {
-                    state: request.current_state,
-                    diagnostics,
-                }
-            }
-        } else {
-            diagnostics.add_error("Provider not configured".to_string(), None::<String>);
-            UpdateResponse {
-                state: request.current_state,
-                diagnostics,
-            }
-        }
-    }
-
-    async fn delete(&self, request: DeleteRequest) -> DeleteResponse {
-        let mut diagnostics = Diagnostics::new();
-
-        // Get client and use it to delete the network resource
-        let client_guard = self.client.read().await;
-        if let Some(client) = client_guard.as_ref() {
-            if let Some(id) = request.current_state.get_string("id") {
-                match client.delete_resource(&id).await {
-                    Ok(()) => {
-                        // Resource successfully deleted
-                        DeleteResponse { diagnostics }
-                    }
-                    Err(e) => {
-                        diagnostics
-                            .add_error(format!("Failed to delete network: {}", e), None::<String>);
-                        DeleteResponse { diagnostics }
-                    }
-                }
-            } else {
-                diagnostics.add_error("Network ID not found in state".to_string(), None::<String>);
-                DeleteResponse { diagnostics }
-            }
-        } else {
-            diagnostics.add_error("Provider not configured".to_string(), None::<String>);
-            DeleteResponse { diagnostics }
+        // For any other version, return as-is
+        // In a real implementation, you would parse the raw state
+        UpgradeResourceStateResponse {
+            upgraded_state: DynamicValue::unknown(),
+            diagnostics,
         }
     }
 }
 
-// Data source with filtering
-struct ServerListDataSource {
-    client: Arc<RwLock<Option<ApiClient>>>,
+// Zone data source
+struct ZoneDataSource {
+    client: Option<ApiClient>,
 }
 
-impl ServerListDataSource {
-    fn new(client: Arc<RwLock<Option<ApiClient>>>) -> Self {
-        Self { client }
+impl ZoneDataSource {
+    fn new() -> Self {
+        Self { client: None }
     }
 }
 
-#[async_trait]
-impl DataSourceV2 for ServerListDataSource {
-    async fn schema(&self, _: SchemaRequest) -> DataSourceSchemaResponse {
+#[async_trait::async_trait]
+impl DataSource for ZoneDataSource {
+    fn type_name(&self) -> &'static str {
+        "advanced_zone"
+    }
+
+    async fn metadata(
+        &self,
+        _ctx: Context,
+        _request: DataSourceMetadataRequest,
+    ) -> DataSourceMetadataResponse {
+        DataSourceMetadataResponse {
+            type_name: self.type_name().to_string(),
+        }
+    }
+
+    async fn validate(
+        &self,
+        _ctx: Context,
+        _request: ValidateDataSourceConfigRequest,
+    ) -> ValidateDataSourceConfigResponse {
+        ValidateDataSourceConfigResponse {
+            diagnostics: vec![],
+        }
+    }
+
+    async fn schema(
+        &self,
+        _ctx: Context,
+        _request: DataSourceSchemaRequest,
+    ) -> DataSourceSchemaResponse {
+        let schema = SchemaBuilder::new()
+            .attribute(
+                AttributeBuilder::new("zone", AttributeType::String)
+                    .required()
+                    .description("Zone name")
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("region", AttributeType::String)
+                    .computed()
+                    .description("Region containing the zone")
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new(
+                    "available_sizes",
+                    AttributeType::List(Box::new(AttributeType::String)),
+                )
+                .computed()
+                .description("Available server sizes in this zone")
+                .build(),
+            )
+            .build();
+
         DataSourceSchemaResponse {
-            schema: DataSourceSchema {
-                version: 1,
-                attributes: HashMap::new(),
-            },
-            diagnostics: Diagnostics::new(),
+            schema,
+            diagnostics: vec![],
         }
     }
 
-    async fn read(&self, request: ReadRequest) -> ReadResponse {
-        let mut diagnostics = Diagnostics::new();
+    async fn read(&self, _ctx: Context, request: ReadDataSourceRequest) -> ReadDataSourceResponse {
+        let mut diagnostics = vec![];
 
-        // Get client and use it to list servers
-        let client_guard = self.client.read().await;
-        if let Some(client) = client_guard.as_ref() {
-            // Extract filter from config if available
-            let filter = request.current_state.get_string("filter");
-            let filter_ref = filter.as_deref();
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                diagnostics.push(Diagnostic::error("Provider not configured", ""));
+                return ReadDataSourceResponse {
+                    state: DynamicValue::unknown(),
+                    deferred: None,
+                    diagnostics,
+                };
+            }
+        };
 
-            match client.list_servers(filter_ref).await {
-                Ok(server_data) => {
-                    // Convert server data from API to Dynamic format
-                    let mut servers = vec![];
-                    for server in server_data {
-                        let mut server_map = HashMap::new();
-                        for (key, value) in server {
-                            server_map.insert(key, Dynamic::String(value));
-                        }
-                        servers.push(Dynamic::Map(server_map));
-                    }
+        let zone = match request.config.get_string(&AttributePath::new("zone")) {
+            Ok(z) => z,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Invalid zone", e.to_string()));
+                return ReadDataSourceResponse {
+                    state: DynamicValue::unknown(),
+                    deferred: None,
+                    diagnostics,
+                };
+            }
+        };
 
-                    let mut state = StateBuilder::new()
-                        .list("servers", servers)
-                        .string("id", "server_list");
+        match client.get_zone_info(&zone).await {
+            Ok(info) => {
+                let mut state = DynamicValue::new(Dynamic::Map(HashMap::new()));
+                state
+                    .set_string(&AttributePath::new("zone"), info.zone)
+                    .unwrap();
+                state
+                    .set_string(&AttributePath::new("region"), info.region)
+                    .unwrap();
 
-                    // Include filter in state if it was provided
-                    if let Some(f) = &filter {
-                        state = state.string("filter", f);
-                    }
+                let sizes: Vec<Dynamic> = info
+                    .available_sizes
+                    .iter()
+                    .map(|s| Dynamic::String(s.to_string()))
+                    .collect();
+                state
+                    .set_list(&AttributePath::new("available_sizes"), sizes)
+                    .unwrap();
 
-                    ReadResponse {
-                        state: Some(state.build()),
-                        diagnostics,
-                    }
-                }
-                Err(e) => {
-                    diagnostics.add_error(format!("Failed to list servers: {}", e), None::<String>);
-                    ReadResponse {
-                        state: None,
-                        diagnostics,
-                    }
+                ReadDataSourceResponse {
+                    state,
+                    deferred: None,
+                    diagnostics,
                 }
             }
-        } else {
-            diagnostics.add_error("Provider not configured".to_string(), None::<String>);
-            ReadResponse {
-                state: None,
-                diagnostics,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("Failed to read zone info", e));
+                ReadDataSourceResponse {
+                    state: DynamicValue::unknown(),
+                    deferred: None,
+                    diagnostics,
+                }
             }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DataSourceWithConfigure for ZoneDataSource {
+    async fn configure(
+        &mut self,
+        _ctx: Context,
+        request: ConfigureDataSourceRequest,
+    ) -> ConfigureDataSourceResponse {
+        if let Some(data) = request.provider_data {
+            if let Ok(client) = data.downcast::<ApiClient>() {
+                self.client = Some((*client).clone());
+            }
+        }
+        ConfigureDataSourceResponse {
+            diagnostics: vec![],
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    println!("Advanced Provider V2 Example\n");
+    println!("Advanced Provider Example");
+    println!("========================");
 
     // Create and configure provider
     let mut provider = AdvancedProvider::new();
 
-    let mut config = Config::new();
-    config.values.insert(
-        "endpoint".to_string(),
-        Dynamic::String("https://api.example.com".to_string()),
-    );
-    config.values.insert(
-        "api_key".to_string(),
-        Dynamic::String("secret-key".to_string()),
-    );
-    config.values.insert(
-        "max_concurrent_operations".to_string(),
-        Dynamic::Number(5.0),
-    );
+    let mut config = DynamicValue::new(Dynamic::Map(HashMap::new()));
     config
-        .values
-        .insert("operation_timeout_ms".to_string(), Dynamic::Number(2000.0));
+        .set_string(
+            &AttributePath::new("endpoint"),
+            "https://api.example.com".to_string(),
+        )
+        .unwrap();
+    config
+        .set_string(&AttributePath::new("api_key"), "a".repeat(32))
+        .unwrap();
+    config
+        .set_string(&AttributePath::new("environment"), "staging".to_string())
+        .unwrap();
 
-    let configure_response = provider
-        .configure(ConfigureRequest {
-            context: tfplug::context::Context::new(),
-            config,
-        })
+    let ctx = Context::new();
+
+    // Validate configuration
+    println!("\n1. Validating provider configuration...");
+    let validate_response = provider
+        .validate(
+            ctx.clone(),
+            ValidateProviderConfigRequest {
+                config: config.clone(),
+                client_capabilities: ClientCapabilities {
+                    deferral_allowed: false,
+                    write_only_attributes_allowed: false,
+                },
+            },
+        )
         .await;
 
-    if !configure_response.diagnostics.errors.is_empty() {
-        eprintln!(
-            "Configuration failed: {:?}",
-            configure_response.diagnostics.errors
-        );
+    if !validate_response.diagnostics.is_empty() {
+        println!("Validation diagnostics:");
+        for diag in &validate_response.diagnostics {
+            println!("  - {:?}: {}", diag.severity, diag.summary);
+        }
+    }
+
+    // Configure provider
+    println!("\n2. Configuring provider...");
+    let configure_response = provider
+        .configure(
+            ctx.clone(),
+            ConfigureProviderRequest {
+                config,
+                terraform_version: "1.0.0".to_string(),
+                client_capabilities: ClientCapabilities {
+                    deferral_allowed: false,
+                    write_only_attributes_allowed: false,
+                },
+            },
+        )
+        .await;
+
+    if !configure_response.diagnostics.is_empty() {
+        println!("Configuration failed!");
         return;
     }
 
-    println!("Provider configured successfully!");
-
-    // Create multiple server resources concurrently
-    println!("\nCreating servers concurrently with rate limiting...");
-    let server_resource = Arc::new(provider.create_resource("advanced_server").await.unwrap());
-
-    let mut server_handles = vec![];
-    for i in 0..10 {
-        let resource = server_resource.clone();
-        let handle = tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-
-            let mut config = Config::new();
-            config
-                .values
-                .insert("name".to_string(), Dynamic::String(format!("server-{}", i)));
-            config
-                .values
-                .insert("size".to_string(), Dynamic::String("medium".to_string()));
-
-            let response = resource
-                .create(CreateRequest {
-                    context: tfplug::context::Context::new(),
-                    config,
-                    planned_state: State::new(),
-                })
-                .await;
-
-            let elapsed = start.elapsed();
-
-            if response.diagnostics.errors.is_empty() {
-                println!(
-                    "  Server {} created in {:?}: ID = {:?}",
-                    i,
-                    elapsed,
-                    response.state.get_string("id")
-                );
-                Some(response.state)
-            } else {
-                eprintln!(
-                    "  Failed to create server {}: {:?}",
-                    i, response.diagnostics.errors
-                );
-                None
-            }
-        });
-        server_handles.push(handle);
-    }
-
-    let server_states: Vec<State> = futures::future::join_all(server_handles)
-        .await
-        .into_iter()
-        .filter_map(|r| r.ok())
-        .filter_map(|s| s)
-        .collect();
-
+    // Get provider metadata
+    println!("\n3. Getting provider metadata...");
+    let metadata_response = provider
+        .metadata(ctx.clone(), ProviderMetadataRequest)
+        .await;
+    println!("Provider type: {}", metadata_response.type_name);
     println!(
-        "\nCreated {} servers (rate limited to 5 concurrent)",
-        server_states.len()
+        "Capabilities: plan_destroy={}, move_resource_state={}",
+        metadata_response.server_capabilities.plan_destroy,
+        metadata_response.server_capabilities.move_resource_state
     );
 
-    // Test data source
-    println!("\nTesting data source with filtering...");
-    let data_source = provider.create_data_source("server_list").await.unwrap();
+    // Create and configure a resource
+    println!("\n4. Creating server resource...");
+    let resources = provider.resources();
+    let resource_factory = resources.get("advanced_server").unwrap();
+    let mut resource = resource_factory();
 
-    let mut ds_config = Config::new();
-    ds_config
-        .values
-        .insert("filter".to_string(), Dynamic::String("1".to_string()));
-
-    let ds_response = data_source
-        .read(ReadRequest {
-            context: tfplug::context::Context::new(),
-            current_state: State::new(),
-        })
+    // Configure the resource with provider data
+    let client = provider.client.read().await.clone().unwrap();
+    resource
+        .configure(
+            ctx.clone(),
+            ConfigureResourceRequest {
+                provider_data: Some(Arc::new(client.clone()) as Arc<dyn Any + Send + Sync>),
+            },
+        )
         .await;
 
-    if let Some(state) = ds_response.state {
-        if let Some(Dynamic::List(servers)) = state.values.get("servers") {
-            println!("Found {} servers matching filter '1':", servers.len());
-            for server in servers {
-                if let Dynamic::Map(s) = server {
-                    println!("  - {:?}", s.get("name"));
-                }
-            }
+    // Get resource schema
+    let schema_response = resource.schema(ctx.clone(), ResourceSchemaRequest).await;
+    println!(
+        "Resource has {} attributes",
+        schema_response.schema.block.attributes.len()
+    );
+
+    // Create a server
+    println!("\n5. Creating a server...");
+    let mut server_config = DynamicValue::new(Dynamic::Map(HashMap::new()));
+    server_config
+        .set_string(&AttributePath::new("name"), "test-server".to_string())
+        .unwrap();
+    server_config
+        .set_string(&AttributePath::new("size"), "medium".to_string())
+        .unwrap();
+
+    let mut tags = HashMap::new();
+    tags.insert("env".to_string(), Dynamic::String("test".to_string()));
+    tags.insert("team".to_string(), Dynamic::String("platform".to_string()));
+    server_config
+        .set_map(&AttributePath::new("tags"), tags)
+        .unwrap();
+
+    let create_response = resource
+        .create(
+            ctx.clone(),
+            CreateResourceRequest {
+                type_name: "advanced_server".to_string(),
+                config: server_config.clone(),
+                planned_state: server_config.clone(),
+                planned_private: Vec::new(),
+                provider_meta: None,
+            },
+        )
+        .await;
+
+    if !create_response.diagnostics.is_empty() {
+        println!("Create failed!");
+        return;
+    }
+
+    let server_id = create_response
+        .new_state
+        .get_string(&AttributePath::new("id"))
+        .unwrap();
+    println!("Created server with ID: {}", server_id);
+
+    // Test import functionality
+    println!("\n6. Testing import functionality...");
+    // In a real provider, you would test import on the actual ServerResource type
+    // For this example, we'll create a new instance directly
+    let server_resource = ServerResource::new();
+
+    let import_response = server_resource
+        .import_state(
+            ctx.clone(),
+            ImportResourceStateRequest {
+                type_name: "advanced_server".to_string(),
+                id: "srv-imported-123".to_string(),
+                client_capabilities: ClientCapabilities {
+                    deferral_allowed: false,
+                    write_only_attributes_allowed: false,
+                },
+                identity: None,
+            },
+        )
+        .await;
+
+    if !import_response.imported_resources.is_empty() {
+        println!(
+            "Successfully imported {} resources",
+            import_response.imported_resources.len()
+        );
+    }
+
+    // Test plan modification
+    println!("\n7. Testing plan modification...");
+    let mut new_state = create_response.new_state.clone();
+    new_state
+        .set_string(&AttributePath::new("size"), "large".to_string())
+        .unwrap();
+
+    let modify_response = server_resource
+        .modify_plan(
+            ctx.clone(),
+            ModifyPlanRequest {
+                type_name: "advanced_server".to_string(),
+                config: server_config,
+                prior_state: create_response.new_state.clone(),
+                proposed_new_state: new_state,
+                prior_private: Vec::new(),
+                provider_meta: None,
+            },
+        )
+        .await;
+
+    if !modify_response.requires_replace.is_empty() {
+        println!("Plan modification detected replacements required for:");
+        for path in &modify_response.requires_replace {
+            println!("  - {:?}", path);
         }
     }
+
+    // Test data source
+    println!("\n8. Testing data source...");
+    let data_sources = provider.data_sources();
+    let ds_factory = data_sources.get("advanced_zone").unwrap();
+    let mut data_source = ds_factory();
+
+    data_source
+        .configure(
+            ctx.clone(),
+            ConfigureDataSourceRequest {
+                provider_data: Some(Arc::new(client) as Arc<dyn Any + Send + Sync>),
+            },
+        )
+        .await;
+
+    let mut zone_config = DynamicValue::new(Dynamic::Map(HashMap::new()));
+    zone_config
+        .set_string(&AttributePath::new("zone"), "us-east-1a".to_string())
+        .unwrap();
+
+    let ds_response = data_source
+        .read(
+            ctx.clone(),
+            ReadDataSourceRequest {
+                type_name: "advanced_zone".to_string(),
+                config: zone_config,
+                provider_meta: None,
+                client_capabilities: ClientCapabilities {
+                    deferral_allowed: false,
+                    write_only_attributes_allowed: false,
+                },
+            },
+        )
+        .await;
+
+    if ds_response.diagnostics.is_empty() {
+        println!(
+            "Zone region: {}",
+            ds_response
+                .state
+                .get_string(&AttributePath::new("region"))
+                .unwrap()
+        );
+        println!(
+            "Available sizes: {:?}",
+            ds_response
+                .state
+                .get_list(&AttributePath::new("available_sizes"))
+                .unwrap()
+        );
+    }
+
+    // Stop provider
+    println!("\n9. Stopping provider...");
+    provider.stop(ctx, StopProviderRequest).await;
+
+    println!("\nAdvanced example completed!");
 }

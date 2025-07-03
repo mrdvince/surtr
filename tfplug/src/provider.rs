@@ -1,468 +1,275 @@
-//! Provider v2 - Factory-based architecture without locks
+//! Provider trait and related types
 //!
-//! This module implements a new provider architecture that eliminates locks
-//! and uses factory methods to create resources and data sources on demand.
-use crate::attribute_type::AttributeType;
-use crate::request::{
-    ConfigureRequest, ConfigureResponse, CreateRequest, CreateResponse, DataSourceSchemaResponse,
-    DeleteRequest, DeleteResponse, ReadRequest, ReadResponse, ResourceSchemaResponse,
-    SchemaRequest, UpdateRequest, UpdateResponse,
-};
-use crate::Result;
+//! This module defines the main Provider trait that all Terraform providers
+//! must implement, along with associated request/response types.
+
+use crate::context::Context;
+use crate::schema::Schema;
+use crate::types::{ClientCapabilities, Diagnostic, DynamicValue, ServerCapabilities};
 use async_trait::async_trait;
+use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-pub struct DataSourceSchema {
-    pub version: i64,
-    pub attributes: HashMap<String, Attribute>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResourceSchema {
-    pub version: i64,
-    pub attributes: HashMap<String, Attribute>,
-}
-
-pub struct Attribute {
-    pub name: String,
-    pub r#type: AttributeType,
-    pub description: String,
-    pub required: bool,
-    pub optional: bool,
-    pub computed: bool,
-    pub sensitive: bool,
-    pub validators: Vec<Box<dyn crate::validator::Validator>>,
-    pub plan_modifiers: Vec<Box<dyn crate::plan_modifier::PlanModifier>>,
-    pub default: Option<Box<dyn crate::defaults::Default>>,
-}
-
-impl std::fmt::Debug for Attribute {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Attribute")
-            .field("name", &self.name)
-            .field("type", &self.r#type)
-            .field("description", &self.description)
-            .field("required", &self.required)
-            .field("optional", &self.optional)
-            .field("computed", &self.computed)
-            .field("sensitive", &self.sensitive)
-            .field(
-                "validators",
-                &format!("{} validators", self.validators.len()),
-            )
-            .field(
-                "plan_modifiers",
-                &format!("{} plan modifiers", self.plan_modifiers.len()),
-            )
-            .field("default", &self.default.is_some())
-            .finish()
-    }
-}
-
-impl Clone for Attribute {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            r#type: self.r#type.clone(),
-            description: self.description.clone(),
-            required: self.required,
-            optional: self.optional,
-            computed: self.computed,
-            sensitive: self.sensitive,
-            validators: vec![],
-            plan_modifiers: vec![],
-            default: None,
-        }
-    }
-}
-
+/// Provider is the main entry point - implement this to create a provider
+/// Lifecycle: new() -> configure() -> resources/data_sources called
 #[async_trait]
-pub trait ProviderV2: Send + Sync {
-    async fn configure(&mut self, request: ConfigureRequest) -> ConfigureResponse;
+pub trait Provider: Send + Sync {
+    /// Return type name (e.g., "proxmox") - MUST be constant
+    fn type_name(&self) -> &str;
 
-    // Factory methods - create instances on demand
-    async fn create_resource(&self, name: &str) -> Result<Box<dyn ResourceV2>>;
-    async fn create_data_source(&self, name: &str) -> Result<Box<dyn DataSourceV2>>;
+    /// Called first to get provider capabilities
+    async fn metadata(
+        &self,
+        ctx: Context,
+        request: ProviderMetadataRequest,
+    ) -> ProviderMetadataResponse;
 
-    // Schema methods - return cached schemas
-    async fn resource_schemas(&self) -> HashMap<String, ResourceSchema>;
-    async fn data_source_schemas(&self) -> HashMap<String, DataSourceSchema>;
+    /// Called to get provider configuration schema
+    async fn schema(&self, ctx: Context, request: ProviderSchemaRequest) -> ProviderSchemaResponse;
+
+    /// Called to get provider meta-schema (for provider_meta blocks)
+    async fn meta_schema(
+        &self,
+        ctx: Context,
+        request: ProviderMetaSchemaRequest,
+    ) -> ProviderMetaSchemaResponse;
+
+    /// Called after validation to configure the provider - store clients here
+    /// IMPORTANT: provider_data from response is passed to all resources/data sources
+    async fn configure(
+        &mut self,
+        ctx: Context,
+        request: ConfigureProviderRequest,
+    ) -> ConfigureProviderResponse;
+
+    /// Called to validate provider configuration
+    async fn validate(
+        &self,
+        ctx: Context,
+        request: ValidateProviderConfigRequest,
+    ) -> ValidateProviderConfigResponse;
+
+    /// Called when provider is shutting down
+    async fn stop(&self, ctx: Context, request: StopProviderRequest) -> StopProviderResponse;
+
+    /// Return resource factories - these create new instances on each call
+    /// CRITICAL: Factories MUST return ResourceWithConfigure trait objects
+    fn resources(&self) -> HashMap<String, ResourceFactory>;
+
+    /// Return data source factories - these create new instances on each call
+    /// CRITICAL: Factories MUST return DataSourceWithConfigure trait objects
+    fn data_sources(&self) -> HashMap<String, DataSourceFactory>;
 }
 
+/// Factory type for creating resources
+/// CRITICAL: Must return ResourceWithConfigure (not base Resource trait)
+pub type ResourceFactory =
+    Box<dyn Fn() -> Box<dyn crate::resource::ResourceWithConfigure> + Send + Sync>;
+
+/// Factory type for creating data sources  
+/// CRITICAL: Must return DataSourceWithConfigure (not base DataSource trait)
+pub type DataSourceFactory =
+    Box<dyn Fn() -> Box<dyn crate::data_source::DataSourceWithConfigure> + Send + Sync>;
+
+// Request/Response types
+
+/// Request for provider metadata
+pub struct ProviderMetadataRequest;
+
+/// Response with provider metadata
+pub struct ProviderMetadataResponse {
+    pub type_name: String,
+    pub server_capabilities: ServerCapabilities,
+}
+
+/// Request for provider schema
+pub struct ProviderSchemaRequest;
+
+/// Response with provider schema
+pub struct ProviderSchemaResponse {
+    pub schema: Schema,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request for provider meta-schema
+pub struct ProviderMetaSchemaRequest;
+
+/// Response with provider meta-schema
+pub struct ProviderMetaSchemaResponse {
+    pub schema: Option<Schema>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request to configure provider
+pub struct ConfigureProviderRequest {
+    pub terraform_version: String,
+    pub config: DynamicValue,
+    pub client_capabilities: ClientCapabilities,
+}
+
+/// Response from provider configuration
+pub struct ConfigureProviderResponse {
+    pub diagnostics: Vec<Diagnostic>,
+    /// Provider-specific data passed to all resources/data sources
+    /// Typically contains API clients, credentials, etc.
+    /// IMPORTANT: This is what gets passed to ResourceWithConfigure.configure()
+    pub provider_data: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+/// Request to validate provider config
+pub struct ValidateProviderConfigRequest {
+    pub config: DynamicValue,
+    pub client_capabilities: ClientCapabilities,
+}
+
+/// Response from provider validation
+pub struct ValidateProviderConfigResponse {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request to stop provider
+pub struct StopProviderRequest;
+
+/// Response from stopping provider
+pub struct StopProviderResponse {
+    pub error: Option<String>,
+}
+
+/// Optional trait for providers with functions
 #[async_trait]
-pub trait ResourceV2: Send + Sync {
-    async fn schema(&self, request: SchemaRequest) -> ResourceSchemaResponse;
-    async fn create(&self, request: CreateRequest) -> CreateResponse;
-    async fn read(&self, request: ReadRequest) -> ReadResponse;
-    async fn update(&self, request: UpdateRequest) -> UpdateResponse;
-    async fn delete(&self, request: DeleteRequest) -> DeleteResponse;
+pub trait ProviderWithFunctions: Provider {
+    /// Return function factories
+    fn functions(&self) -> HashMap<String, FunctionFactory>;
 }
 
+/// Factory type for creating functions
+pub type FunctionFactory = Box<dyn Fn() -> Box<dyn crate::function::Function> + Send + Sync>;
+
+/// Optional trait for providers with ephemeral resources
 #[async_trait]
-pub trait DataSourceV2: Send + Sync {
-    async fn schema(&self, request: SchemaRequest) -> DataSourceSchemaResponse;
-    async fn read(&self, request: ReadRequest) -> ReadResponse;
+pub trait ProviderWithEphemeralResources: Provider {
+    /// Return ephemeral resource factories
+    fn ephemeral_resources(&self) -> HashMap<String, EphemeralResourceFactory>;
 }
+
+/// Factory type for creating ephemeral resources
+pub type EphemeralResourceFactory =
+    Box<dyn Fn() -> Box<dyn crate::ephemeral::EphemeralResource> + Send + Sync>;
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::context::Context;
-    use crate::types::{Config, Diagnostics, Dynamic, State};
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::task;
-    use tokio::time::sleep;
 
-    #[tokio::test]
-    async fn provider_can_be_shared_across_threads_without_locks() {
-        let provider = Arc::new(TestProvider::new());
-        let mut handles = vec![];
-
-        // Spawn 10 tasks that will all create and use resources concurrently
-        for i in 0..10 {
-            let provider_clone = provider.clone();
-            let handle = task::spawn(async move {
-                // Create a new resource instance
-                let resource = provider_clone
-                    .create_resource("test_resource")
-                    .await
-                    .expect("Should create resource");
-
-                // Use the resource
-                let mut config = Config::new();
-                config.values.insert(
-                    "thread_index".to_string(),
-                    Dynamic::String(format!("{}", i)),
-                );
-
-                let req = CreateRequest {
-                    context: Context::new(),
-                    config,
-                    planned_state: State::new(),
-                };
-                let resp = resource.create(req).await;
-
-                assert_eq!(resp.diagnostics.errors.len(), 0);
-                // Verify we got a unique task ID
-                assert!(resp.state.get_string("task_id").is_some());
-                // Verify our thread index was preserved
-                assert_eq!(
-                    resp.state.get_string("thread_index").unwrap(),
-                    format!("{}", i)
-                );
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn factory_creates_new_instances_each_time() {
-        let provider = TestProvider::new();
-
-        // Just verify factory methods work - can't check pointer equality with unit structs
-        let resource1 = provider.create_resource("test_resource").await;
-        let resource2 = provider.create_resource("test_resource").await;
-
-        assert!(resource1.is_ok());
-        assert!(resource2.is_ok());
-    }
-
-    #[tokio::test]
-    async fn schemas_return_consistent_values() {
-        let provider = TestProvider::new();
-
-        let schemas1 = provider.resource_schemas().await;
-        let schemas2 = provider.resource_schemas().await;
-
-        // Should return the same values
-        assert_eq!(schemas1.len(), schemas2.len());
-        assert!(schemas1.contains_key("test_resource"));
-        assert!(schemas1.contains_key("slow_resource"));
-    }
-
-    #[tokio::test]
-    async fn concurrent_operations_do_not_block_each_other() {
-        let provider = Arc::new(TestProvider::new());
-        let start = std::time::Instant::now();
-
-        let mut handles = vec![];
-        for _ in 0..5 {
-            let provider_clone = provider.clone();
-            let handle = task::spawn(async move {
-                let resource = provider_clone
-                    .create_resource("slow_resource")
-                    .await
-                    .unwrap();
-                let req = CreateRequest {
-                    context: Context::new(),
-                    config: Config::new(),
-                    planned_state: State::new(),
-                };
-
-                // This simulates a slow operation
-                resource.create(req).await;
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        let elapsed = start.elapsed();
-        // If operations were serialized, this would take 5 * 100ms = 500ms
-        // With concurrent execution, should be close to 100ms
-        assert!(
-            elapsed.as_millis() < 200,
-            "Operations took too long: {:?}",
-            elapsed
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_resource_returns_error() {
-        let provider = TestProvider::new();
-
-        let result = provider.create_resource("unknown").await;
-        assert!(result.is_err());
-
-        let error_msg = result.err().unwrap().to_string();
-        assert!(error_msg.contains("Unknown resource"));
-    }
-
-    #[tokio::test]
-    async fn data_source_factory_works() {
-        let provider = TestProvider::new();
-
-        let data_source = provider.create_data_source("test_data").await.unwrap();
-        let req = ReadRequest {
-            context: Context::new(),
-            current_state: State::new(),
-        };
-
-        let resp = data_source.read(req).await;
-        assert!(resp.state.is_some());
-        assert_eq!(resp.state.unwrap().get_string("version").unwrap(), "1.0.0");
-    }
-
-    // Test provider implementation
     struct TestProvider {
         configured: bool,
     }
 
-    impl TestProvider {
-        fn new() -> Self {
-            Self { configured: false }
-        }
-    }
-
     #[async_trait]
-    impl ProviderV2 for TestProvider {
-        async fn configure(&mut self, _request: ConfigureRequest) -> ConfigureResponse {
+    impl Provider for TestProvider {
+        fn type_name(&self) -> &str {
+            "test"
+        }
+
+        async fn metadata(
+            &self,
+            _ctx: Context,
+            _request: ProviderMetadataRequest,
+        ) -> ProviderMetadataResponse {
+            ProviderMetadataResponse {
+                type_name: "test".to_string(),
+                server_capabilities: ServerCapabilities {
+                    plan_destroy: false,
+                    get_provider_schema_optional: false,
+                    move_resource_state: false,
+                },
+            }
+        }
+
+        async fn schema(
+            &self,
+            _ctx: Context,
+            _request: ProviderSchemaRequest,
+        ) -> ProviderSchemaResponse {
+            ProviderSchemaResponse {
+                schema: crate::schema::SchemaBuilder::new().build(),
+                diagnostics: vec![],
+            }
+        }
+
+        async fn meta_schema(
+            &self,
+            _ctx: Context,
+            _request: ProviderMetaSchemaRequest,
+        ) -> ProviderMetaSchemaResponse {
+            ProviderMetaSchemaResponse {
+                schema: None,
+                diagnostics: vec![],
+            }
+        }
+
+        async fn configure(
+            &mut self,
+            _ctx: Context,
+            _request: ConfigureProviderRequest,
+        ) -> ConfigureProviderResponse {
             self.configured = true;
-            ConfigureResponse {
-                diagnostics: Diagnostics::new(),
+            ConfigureProviderResponse {
+                diagnostics: vec![],
+                provider_data: Some(Arc::new("test_data".to_string()) as Arc<dyn Any + Send + Sync>),
             }
         }
 
-        async fn create_resource(&self, name: &str) -> Result<Box<dyn ResourceV2>> {
-            match name {
-                "test_resource" => Ok(Box::new(TestResource::new())),
-                "slow_resource" => Ok(Box::new(SlowResource)),
-                _ => Err(format!("Unknown resource: {}", name).into()),
+        async fn validate(
+            &self,
+            _ctx: Context,
+            _request: ValidateProviderConfigRequest,
+        ) -> ValidateProviderConfigResponse {
+            ValidateProviderConfigResponse {
+                diagnostics: vec![],
             }
         }
 
-        async fn create_data_source(&self, name: &str) -> Result<Box<dyn DataSourceV2>> {
-            match name {
-                "test_data" => Ok(Box::new(TestDataSource)),
-                _ => Err(format!("Unknown data source: {}", name).into()),
-            }
+        async fn stop(&self, _ctx: Context, _request: StopProviderRequest) -> StopProviderResponse {
+            StopProviderResponse { error: None }
         }
 
-        async fn resource_schemas(&self) -> HashMap<String, ResourceSchema> {
-            // Return empty map for now since ResourceSchema doesn't implement Clone
-            // In a real implementation, you would likely cache these or generate them on demand
-            let mut schemas = HashMap::new();
-            schemas.insert(
-                "test_resource".to_string(),
-                ResourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-            );
-            schemas.insert(
-                "slow_resource".to_string(),
-                ResourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-            );
-            schemas
+        fn resources(&self) -> HashMap<String, ResourceFactory> {
+            HashMap::new()
         }
 
-        async fn data_source_schemas(&self) -> HashMap<String, DataSourceSchema> {
-            // Return empty map for now since DataSourceSchema doesn't implement Clone
-            let mut schemas = HashMap::new();
-            schemas.insert(
-                "test_data".to_string(),
-                DataSourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-            );
-            schemas
+        fn data_sources(&self) -> HashMap<String, DataSourceFactory> {
+            HashMap::new()
         }
     }
 
-    struct TestResource;
+    #[tokio::test]
+    async fn provider_metadata_returns_type_name() {
+        let provider = TestProvider { configured: false };
+        let ctx = Context::new();
+        let response = provider.metadata(ctx, ProviderMetadataRequest).await;
 
-    impl TestResource {
-        fn new() -> Self {
-            Self
-        }
+        assert_eq!(response.type_name, "test");
+        assert!(!response.server_capabilities.plan_destroy);
     }
 
-    #[async_trait]
-    impl ResourceV2 for TestResource {
-        async fn schema(&self, _request: SchemaRequest) -> ResourceSchemaResponse {
-            ResourceSchemaResponse {
-                schema: ResourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-                diagnostics: Diagnostics::new(),
-            }
-        }
+    #[tokio::test]
+    async fn provider_configure_stores_data() {
+        let mut provider = TestProvider { configured: false };
+        let ctx = Context::new();
+        let request = ConfigureProviderRequest {
+            terraform_version: "1.0.0".to_string(),
+            config: DynamicValue::null(),
+            client_capabilities: ClientCapabilities {
+                deferral_allowed: false,
+                write_only_attributes_allowed: false,
+            },
+        };
 
-        async fn create(&self, request: CreateRequest) -> CreateResponse {
-            let mut state = State::new();
-            state.values.insert(
-                "id".to_string(),
-                Dynamic::String("generated-id".to_string()),
-            );
+        let response = provider.configure(ctx, request).await;
 
-            // Add task info to verify concurrent execution
-            let task_id = match task::try_id() {
-                Some(id) => format!("{:?}", id),
-                None => "no-task-id".to_string(),
-            };
-            state
-                .values
-                .insert("task_id".to_string(), Dynamic::String(task_id));
-
-            // Pass through any thread index from config
-            if let Some(thread_index) = request.config.get_string("thread_index") {
-                state
-                    .values
-                    .insert("thread_index".to_string(), Dynamic::String(thread_index));
-            }
-
-            CreateResponse {
-                state,
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn read(&self, request: ReadRequest) -> ReadResponse {
-            ReadResponse {
-                state: Some(request.current_state),
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn update(&self, _request: UpdateRequest) -> UpdateResponse {
-            UpdateResponse {
-                state: State::new(),
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn delete(&self, _request: DeleteRequest) -> DeleteResponse {
-            DeleteResponse {
-                diagnostics: Diagnostics::new(),
-            }
-        }
-    }
-
-    // Slow resource for testing concurrency
-    struct SlowResource;
-
-    #[async_trait]
-    impl ResourceV2 for SlowResource {
-        async fn schema(&self, _request: SchemaRequest) -> ResourceSchemaResponse {
-            ResourceSchemaResponse {
-                schema: ResourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn create(&self, _request: CreateRequest) -> CreateResponse {
-            // Simulate slow operation
-            sleep(Duration::from_millis(100)).await;
-
-            CreateResponse {
-                state: State::new(),
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn read(&self, request: ReadRequest) -> ReadResponse {
-            ReadResponse {
-                state: Some(request.current_state),
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn update(&self, _request: UpdateRequest) -> UpdateResponse {
-            UpdateResponse {
-                state: State::new(),
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn delete(&self, _request: DeleteRequest) -> DeleteResponse {
-            DeleteResponse {
-                diagnostics: Diagnostics::new(),
-            }
-        }
-    }
-
-    struct TestDataSource;
-
-    #[async_trait]
-    impl DataSourceV2 for TestDataSource {
-        async fn schema(&self, _request: SchemaRequest) -> DataSourceSchemaResponse {
-            DataSourceSchemaResponse {
-                schema: DataSourceSchema {
-                    version: 1,
-                    attributes: HashMap::new(),
-                },
-                diagnostics: Diagnostics::new(),
-            }
-        }
-
-        async fn read(&self, _request: ReadRequest) -> ReadResponse {
-            let mut state = State::new();
-            state
-                .values
-                .insert("version".to_string(), Dynamic::String("1.0.0".to_string()));
-
-            ReadResponse {
-                state: Some(state),
-                diagnostics: Diagnostics::new(),
-            }
-        }
+        assert!(provider.configured);
+        assert!(response.diagnostics.is_empty());
+        assert!(response.provider_data.is_some());
     }
 }

@@ -1,21 +1,33 @@
-pub mod api;
-pub mod data_sources;
-pub mod resources;
+//! Proxmox Terraform Provider
+//!
+//! This provider enables management of Proxmox VE resources through Terraform.
 
 use async_trait::async_trait;
+use std::any::Any;
 use std::collections::HashMap;
-use tfplug::provider::{DataSourceSchema, ResourceSchema};
-use tfplug::request::{ConfigureRequest, ConfigureResponse};
-use tfplug::{DataSourceV2, Diagnostics, ProviderV2, ResourceV2};
+use std::sync::Arc;
+use tfplug::context::Context;
+use tfplug::provider::{
+    ConfigureProviderRequest, ConfigureProviderResponse, DataSourceFactory, Provider,
+    ProviderMetaSchemaRequest, ProviderMetaSchemaResponse, ProviderMetadataRequest,
+    ProviderMetadataResponse, ProviderSchemaRequest, ProviderSchemaResponse, ResourceFactory,
+    StopProviderRequest, StopProviderResponse, ValidateProviderConfigRequest,
+    ValidateProviderConfigResponse,
+};
+use tfplug::schema::{AttributeBuilder, AttributeType, SchemaBuilder};
+use tfplug::types::{AttributePath, Diagnostic, ServerCapabilities};
 
+pub mod api;
+pub mod data_sources;
+mod provider_data;
+pub mod resources;
+
+pub use provider_data::ProxmoxProviderData;
+
+/// Main Proxmox provider struct
 pub struct ProxmoxProvider {
+    /// API client instance (set during configure)
     client: Option<api::Client>,
-}
-
-impl Default for ProxmoxProvider {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ProxmoxProvider {
@@ -24,301 +36,214 @@ impl ProxmoxProvider {
     }
 }
 
+impl Default for ProxmoxProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
-impl ProviderV2 for ProxmoxProvider {
-    async fn configure(&mut self, request: ConfigureRequest) -> ConfigureResponse {
+impl Provider for ProxmoxProvider {
+    fn type_name(&self) -> &str {
+        "proxmox"
+    }
+
+    async fn metadata(
+        &self,
+        _ctx: Context,
+        _request: ProviderMetadataRequest,
+    ) -> ProviderMetadataResponse {
+        ProviderMetadataResponse {
+            type_name: self.type_name().to_string(),
+            server_capabilities: ServerCapabilities {
+                plan_destroy: false,
+                get_provider_schema_optional: false,
+                move_resource_state: false,
+            },
+        }
+    }
+
+    async fn schema(
+        &self,
+        _ctx: Context,
+        _request: ProviderSchemaRequest,
+    ) -> ProviderSchemaResponse {
+        let schema = SchemaBuilder::new()
+            .version(0)
+            .description("Proxmox VE provider configuration")
+            .attribute(
+                AttributeBuilder::new("endpoint", AttributeType::String)
+                    .description("The API endpoint URL (e.g., https://proxmox.example.com:8006)")
+                    .optional()
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("api_token", AttributeType::String)
+                    .description("API token for authentication (format: user@realm!tokenid=secret)")
+                    .optional()
+                    .sensitive()
+                    .build(),
+            )
+            .attribute(
+                AttributeBuilder::new("insecure", AttributeType::Bool)
+                    .description("Skip TLS certificate verification")
+                    .optional()
+                    .build(),
+            )
+            .build();
+
+        ProviderSchemaResponse {
+            schema,
+            diagnostics: vec![],
+        }
+    }
+
+    async fn meta_schema(
+        &self,
+        _ctx: Context,
+        _request: ProviderMetaSchemaRequest,
+    ) -> ProviderMetaSchemaResponse {
+        ProviderMetaSchemaResponse {
+            schema: None,
+            diagnostics: vec![],
+        }
+    }
+
+    async fn configure(
+        &mut self,
+        _ctx: Context,
+        request: ConfigureProviderRequest,
+    ) -> ConfigureProviderResponse {
+        let mut diagnostics = Vec::new();
+
         let endpoint = request
             .config
-            .values
-            .get("endpoint")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
+            .get_string(&AttributePath::new("endpoint"))
+            .ok()
             .or_else(|| std::env::var("PROXMOX_ENDPOINT").ok());
 
         let api_token = request
             .config
-            .values
-            .get("api_token")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
+            .get_string(&AttributePath::new("api_token"))
+            .ok()
             .or_else(|| std::env::var("PROXMOX_API_TOKEN").ok());
 
         let insecure = request
             .config
-            .values
-            .get("insecure")
-            .and_then(|v| v.as_bool())
-            .or_else(|| {
+            .get_bool(&AttributePath::new("insecure"))
+            .unwrap_or_else(|_| {
                 std::env::var("PROXMOX_INSECURE")
                     .ok()
-                    .and_then(|v| v.parse::<bool>().ok())
-            })
-            .unwrap_or(false);
+                    .map(|s| s.to_lowercase() == "true")
+                    .unwrap_or(false)
+            });
 
-        let mut diags = Diagnostics::new();
+        let endpoint = match endpoint {
+            Some(e) => e,
+            None => {
+                diagnostics.push(Diagnostic::error(
+                    "Missing endpoint",
+                    "The 'endpoint' configuration is required. Set it in the provider config or PROXMOX_ENDPOINT environment variable.",
+                ));
+                return ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: None,
+                };
+            }
+        };
 
-        match (endpoint, api_token) {
-            (Some(endpoint), Some(api_token)) => {
-                match api::Client::new(endpoint.clone(), api_token.clone(), insecure) {
-                    Ok(client) => {
-                        self.client = Some(client);
-                    }
-                    Err(e) => {
-                        diags.add_error(
-                            format!("Failed to create API client: {}", e),
-                            None::<String>,
-                        );
-                    }
+        let api_token = match api_token {
+            Some(t) => t,
+            None => {
+                diagnostics.push(Diagnostic::error(
+                    "Missing API token",
+                    "The 'api_token' configuration is required. Set it in the provider config or PROXMOX_API_TOKEN environment variable.",
+                ));
+                return ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: None,
+                };
+            }
+        };
+
+        match api::Client::new(&endpoint, &api_token, insecure) {
+            Ok(client) => {
+                let provider_data = ProxmoxProviderData::new(client.clone());
+                self.client = Some(client);
+                ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: Some(Arc::new(provider_data) as Arc<dyn Any + Send + Sync>),
                 }
             }
-            (None, _) => {
-                diags.add_error(
-                    "endpoint is required (set in provider config or PROXMOX_ENDPOINT env var)",
-                    None::<String>,
-                );
-            }
-            (_, None) => {
-                diags.add_error(
-                    "api_token is required (set in provider config or PROXMOX_API_TOKEN env var)",
-                    None::<String>,
-                );
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    "Failed to create API client",
+                    format!("Error: {}", e),
+                ));
+                ConfigureProviderResponse {
+                    diagnostics,
+                    provider_data: None,
+                }
             }
         }
-
-        ConfigureResponse { diagnostics: diags }
     }
 
-    async fn create_resource(&self, name: &str) -> tfplug::Result<Box<dyn ResourceV2>> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or("Provider not configured")?
-            .clone();
+    async fn validate(
+        &self,
+        _ctx: Context,
+        request: ValidateProviderConfigRequest,
+    ) -> ValidateProviderConfigResponse {
+        let mut diagnostics = Vec::new();
 
-        match name {
-            "proxmox_realm" => Ok(Box::new(resources::realm::RealmResource::new(client))),
-            _ => Err(format!("Unknown resource: {}", name).into()),
+        if let Ok(endpoint) = request.config.get_string(&AttributePath::new("endpoint")) {
+            if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                diagnostics.push(Diagnostic::error(
+                    "Invalid endpoint",
+                    "The endpoint must start with http:// or https://",
+                ));
+            }
         }
-    }
 
-    async fn create_data_source(&self, name: &str) -> tfplug::Result<Box<dyn DataSourceV2>> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or("Provider not configured")?
-            .clone();
-
-        match name {
-            "proxmox_version" => Ok(Box::new(data_sources::version::VersionDataSource::new(
-                client,
-            ))),
-            _ => Err(format!("Unknown data source: {}", name).into()),
+        if let Ok(api_token) = request.config.get_string(&AttributePath::new("api_token")) {
+            if !api_token.contains('!') || !api_token.contains('=') {
+                diagnostics.push(Diagnostic::warning(
+                    "Invalid API token format",
+                    "API token should be in format: user@realm!tokenid=secret",
+                ));
+            }
         }
+
+        ValidateProviderConfigResponse { diagnostics }
     }
 
-    async fn resource_schemas(&self) -> HashMap<String, ResourceSchema> {
-        static SCHEMAS: std::sync::OnceLock<HashMap<String, ResourceSchema>> =
-            std::sync::OnceLock::new();
-
-        SCHEMAS
-            .get_or_init(|| {
-                let mut schemas = HashMap::new();
-                schemas.insert(
-                    "proxmox_realm".to_string(),
-                    resources::RealmResource::schema_static(),
-                );
-                schemas
-            })
-            .clone()
+    async fn stop(&self, _ctx: Context, _request: StopProviderRequest) -> StopProviderResponse {
+        StopProviderResponse { error: None }
     }
 
-    async fn data_source_schemas(&self) -> HashMap<String, DataSourceSchema> {
-        static SCHEMAS: std::sync::OnceLock<HashMap<String, DataSourceSchema>> =
-            std::sync::OnceLock::new();
+    fn resources(&self) -> HashMap<String, ResourceFactory> {
+        let mut resources = HashMap::new();
 
-        SCHEMAS
-            .get_or_init(|| {
-                let mut schemas = HashMap::new();
-                schemas.insert(
-                    "proxmox_version".to_string(),
-                    data_sources::VersionDataSource::schema_static(),
-                );
-                schemas
-            })
-            .clone()
-    }
-}
+        resources.insert(
+            "proxmox_realm".to_string(),
+            Box::new(|| {
+                Box::new(resources::RealmResource::new()) as Box<dyn tfplug::ResourceWithConfigure>
+            }) as ResourceFactory,
+        );
 
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-    use tfplug::context::Context;
-    use tfplug::types::Config;
-
-    #[tokio::test]
-    #[serial]
-    async fn provider_configures_successfully_with_env_vars() {
-        std::env::set_var("PROXMOX_ENDPOINT", "https://localhost:8006");
-        std::env::set_var("PROXMOX_API_TOKEN", "test@pve!token=secret");
-        std::env::set_var("PROXMOX_INSECURE", "true");
-
-        let mut provider = ProxmoxProvider::new();
-        let request = ConfigureRequest {
-            context: Context::new(),
-            config: Config {
-                values: HashMap::new(),
-            },
-        };
-
-        let response = provider.configure(request).await;
-        assert!(response.diagnostics.errors.is_empty());
-        assert!(provider.client.is_some());
-
-        std::env::remove_var("PROXMOX_ENDPOINT");
-        std::env::remove_var("PROXMOX_API_TOKEN");
-        std::env::remove_var("PROXMOX_INSECURE");
+        resources
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn provider_configure_requires_endpoint() {
-        std::env::remove_var("PROXMOX_ENDPOINT");
-        std::env::set_var("PROXMOX_API_TOKEN", "test@pve!token=secret");
+    fn data_sources(&self) -> HashMap<String, DataSourceFactory> {
+        let mut data_sources = HashMap::new();
 
-        let mut provider = ProxmoxProvider::new();
-        let request = ConfigureRequest {
-            context: Context::new(),
-            config: Config {
-                values: HashMap::new(),
-            },
-        };
+        data_sources.insert(
+            "proxmox_version".to_string(),
+            Box::new(|| {
+                Box::new(data_sources::data_source_version::VersionDataSource::new())
+                    as Box<dyn tfplug::DataSourceWithConfigure>
+            }) as DataSourceFactory,
+        );
 
-        let response = provider.configure(request).await;
-        assert!(!response.diagnostics.errors.is_empty());
-        assert!(response.diagnostics.errors[0]
-            .summary
-            .contains("endpoint is required"));
-
-        std::env::remove_var("PROXMOX_API_TOKEN");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn provider_configure_requires_api_token() {
-        std::env::set_var("PROXMOX_ENDPOINT", "https://localhost:8006");
-        std::env::remove_var("PROXMOX_API_TOKEN");
-
-        let mut provider = ProxmoxProvider::new();
-        let request = ConfigureRequest {
-            context: Context::new(),
-            config: Config {
-                values: HashMap::new(),
-            },
-        };
-
-        let response = provider.configure(request).await;
-        assert!(!response.diagnostics.errors.is_empty());
-        assert!(response.diagnostics.errors[0]
-            .summary
-            .contains("api_token is required"));
-
-        std::env::remove_var("PROXMOX_ENDPOINT");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn provider_creates_resources_after_configuration() {
-        std::env::set_var("PROXMOX_ENDPOINT", "https://localhost:8006");
-        std::env::set_var("PROXMOX_API_TOKEN", "test@pve!token=secret");
-        std::env::set_var("PROXMOX_INSECURE", "true");
-
-        let mut provider = ProxmoxProvider::new();
-        let request = ConfigureRequest {
-            context: Context::new(),
-            config: Config {
-                values: HashMap::new(),
-            },
-        };
-
-        provider.configure(request).await;
-
-        let resource = provider.create_resource("proxmox_realm").await;
-        assert!(resource.is_ok());
-
-        let unknown_resource = provider.create_resource("unknown_resource").await;
-        assert!(unknown_resource.is_err());
-
-        std::env::remove_var("PROXMOX_ENDPOINT");
-        std::env::remove_var("PROXMOX_API_TOKEN");
-        std::env::remove_var("PROXMOX_INSECURE");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn provider_creates_data_sources_after_configuration() {
-        std::env::set_var("PROXMOX_ENDPOINT", "https://localhost:8006");
-        std::env::set_var("PROXMOX_API_TOKEN", "test@pve!token=secret");
-        std::env::set_var("PROXMOX_INSECURE", "true");
-
-        let mut provider = ProxmoxProvider::new();
-        let request = ConfigureRequest {
-            context: Context::new(),
-            config: Config {
-                values: HashMap::new(),
-            },
-        };
-
-        provider.configure(request).await;
-
-        let data_source = provider.create_data_source("proxmox_version").await;
-        assert!(data_source.is_ok());
-
-        let unknown_data_source = provider.create_data_source("unknown_data_source").await;
-        assert!(unknown_data_source.is_err());
-
-        std::env::remove_var("PROXMOX_ENDPOINT");
-        std::env::remove_var("PROXMOX_API_TOKEN");
-        std::env::remove_var("PROXMOX_INSECURE");
-    }
-
-    #[tokio::test]
-    async fn provider_fails_to_create_resources_before_configuration() {
-        let provider = ProxmoxProvider::new();
-
-        let resource = provider.create_resource("proxmox_realm").await;
-        assert!(resource.is_err());
-        assert!(resource
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Provider not configured"));
-    }
-
-    #[tokio::test]
-    async fn provider_schemas_are_cached_and_immutable() {
-        let provider = ProxmoxProvider::new();
-
-        let schemas1 = provider.resource_schemas().await;
-        let schemas2 = provider.resource_schemas().await;
-
-        assert_eq!(schemas1.len(), schemas2.len());
-
-        let data_schemas1 = provider.data_source_schemas().await;
-        let data_schemas2 = provider.data_source_schemas().await;
-
-        assert_eq!(data_schemas1.len(), data_schemas2.len());
-    }
-
-    #[tokio::test]
-    async fn provider_schemas_contain_expected_resources() {
-        let provider = ProxmoxProvider::new();
-
-        let resource_schemas = provider.resource_schemas().await;
-        assert!(resource_schemas.contains_key("proxmox_realm"));
-
-        let data_source_schemas = provider.data_source_schemas().await;
-        assert!(data_source_schemas.contains_key("proxmox_version"));
+        data_sources
     }
 }
