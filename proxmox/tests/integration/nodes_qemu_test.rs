@@ -1,8 +1,7 @@
 //! Integration tests for Proxmox QEMU/VM operations
 
-use proxmox::api::{Client, TaskId};
+use proxmox::api::Client;
 use proxmox::api::nodes::{CreateQemuRequest, UpdateQemuRequest};
-use proxmox::ProxmoxProvider;
 use std::sync::Arc;
 
 #[tokio::test]
