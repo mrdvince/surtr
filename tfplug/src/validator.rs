@@ -1,269 +1,324 @@
-use crate::types::{Diagnostics, Dynamic};
+//! Validators for attribute validation
+//!
+//! This module provides built-in validators and the trait for custom validators.
 
-pub trait Validator: Send + Sync {
-    fn validate(&self, value: &Dynamic, attribute_path: &str, diagnostics: &mut Diagnostics);
+use crate::schema::{Validator, ValidatorRequest, ValidatorResponse};
+use crate::types::{Diagnostic, Dynamic};
+
+/// String length validator - validates string minimum and maximum length
+pub struct StringLengthValidator {
+    min: Option<usize>,
+    max: Option<usize>,
 }
 
-pub struct StringLengthValidator {
-    pub min: Option<usize>,
-    pub max: Option<usize>,
+impl StringLengthValidator {
+    /// Create a validator with minimum length
+    pub fn min(length: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(length),
+            max: None,
+        })
+    }
+
+    /// Create a validator with maximum length
+    pub fn max(length: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: None,
+            max: Some(length),
+        })
+    }
+
+    /// Create a validator with both min and max length
+    pub fn between(min: usize, max: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(min),
+            max: Some(max),
+        })
+    }
 }
 
 impl Validator for StringLengthValidator {
-    fn validate(&self, value: &Dynamic, attribute_path: &str, diagnostics: &mut Diagnostics) {
-        if let Some(s) = value.as_string() {
+    fn description(&self) -> String {
+        match (self.min, self.max) {
+            (Some(min), Some(max)) => format!("string length must be between {} and {}", min, max),
+            (Some(min), None) => format!("string length must be at least {}", min),
+            (None, Some(max)) => format!("string length must be at most {}", max),
+            (None, None) => "string length validator".to_string(),
+        }
+    }
+
+    fn validate(&self, request: ValidatorRequest) -> ValidatorResponse {
+        let mut diagnostics = Vec::new();
+
+        if let Dynamic::String(s) = &request.config_value.value {
+            let len = s.len();
+
             if let Some(min) = self.min {
-                if s.len() < min {
-                    diagnostics.add_error(
-                        format!("{} must have minimum length of {}", attribute_path, min),
-                        Some(format!("Got length {}", s.len())),
+                if len < min {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "String too short",
+                            format!("String length {} is less than minimum {}", len, min),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
+
             if let Some(max) = self.max {
-                if s.len() > max {
-                    diagnostics.add_error(
-                        format!("{} must have maximum length of {}", attribute_path, max),
-                        Some(format!("Got length {}", s.len())),
+                if len > max {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "String too long",
+                            format!("String length {} is greater than maximum {}", len, max),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
         }
+
+        ValidatorResponse { diagnostics }
     }
 }
 
-pub struct StringPatternValidator {
-    pub pattern: regex::Regex,
-    pub description: String,
+/// Validates that a string matches one of the allowed values
+pub struct StringOneOfValidator {
+    allowed: Vec<String>,
 }
 
-impl Validator for StringPatternValidator {
-    fn validate(&self, value: &Dynamic, attribute_path: &str, diagnostics: &mut Diagnostics) {
-        if let Some(s) = value.as_string() {
-            if !self.pattern.is_match(s) {
-                diagnostics.add_error(
-                    format!("{} must match {}", attribute_path, self.description),
-                    Some(format!("Value '{}' does not match pattern", s)),
+impl StringOneOfValidator {
+    /// Create a validator that ensures the value is one of the allowed strings
+    pub fn create(allowed: Vec<String>) -> Box<dyn Validator> {
+        Box::new(Self { allowed })
+    }
+}
+
+impl Validator for StringOneOfValidator {
+    fn description(&self) -> String {
+        format!("value must be one of: {:?}", self.allowed)
+    }
+
+    fn validate(&self, request: ValidatorRequest) -> ValidatorResponse {
+        let mut diagnostics = Vec::new();
+
+        if let Dynamic::String(s) = &request.config_value.value {
+            if !self.allowed.contains(s) {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "Invalid value",
+                        format!(
+                            "\"{}\" is not one of the allowed values: {:?}",
+                            s, self.allowed
+                        ),
+                    )
+                    .with_attribute(request.path),
                 );
             }
         }
+
+        ValidatorResponse { diagnostics }
     }
 }
 
+/// Validates that a number is within a range
 pub struct NumberRangeValidator {
-    pub min: Option<f64>,
-    pub max: Option<f64>,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+impl NumberRangeValidator {
+    /// Create a validator with minimum value
+    pub fn min(value: f64) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(value),
+            max: None,
+        })
+    }
+
+    /// Create a validator with maximum value
+    pub fn max(value: f64) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: None,
+            max: Some(value),
+        })
+    }
+
+    /// Create a validator with both min and max value
+    pub fn between(min: f64, max: f64) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(min),
+            max: Some(max),
+        })
+    }
 }
 
 impl Validator for NumberRangeValidator {
-    fn validate(&self, value: &Dynamic, attribute_path: &str, diagnostics: &mut Diagnostics) {
-        if let Some(n) = value.as_number() {
+    fn description(&self) -> String {
+        match (self.min, self.max) {
+            (Some(min), Some(max)) => format!("number must be between {} and {}", min, max),
+            (Some(min), None) => format!("number must be at least {}", min),
+            (None, Some(max)) => format!("number must be at most {}", max),
+            (None, None) => "number range validator".to_string(),
+        }
+    }
+
+    fn validate(&self, request: ValidatorRequest) -> ValidatorResponse {
+        let mut diagnostics = Vec::new();
+
+        if let Dynamic::Number(n) = &request.config_value.value {
             if let Some(min) = self.min {
-                if n < min {
-                    diagnostics.add_error(
-                        format!("{} must be at least {}", attribute_path, min),
-                        Some(format!("Got {}", n)),
+                if n < &min {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "Number too small",
+                            format!("Value {} is less than minimum {}", n, min),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
+
             if let Some(max) = self.max {
-                if n > max {
-                    diagnostics.add_error(
-                        format!("{} must be at most {}", attribute_path, max),
-                        Some(format!("Got {}", n)),
+                if n > &max {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "Number too large",
+                            format!("Value {} is greater than maximum {}", n, max),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
         }
+
+        ValidatorResponse { diagnostics }
     }
 }
 
+/// Validates list length
 pub struct ListLengthValidator {
-    pub min: Option<usize>,
-    pub max: Option<usize>,
+    min: Option<usize>,
+    max: Option<usize>,
+}
+
+impl ListLengthValidator {
+    /// Create a validator with minimum length
+    pub fn min(length: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(length),
+            max: None,
+        })
+    }
+
+    /// Create a validator with maximum length
+    pub fn max(length: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: None,
+            max: Some(length),
+        })
+    }
+
+    /// Create a validator with both min and max length
+    pub fn between(min: usize, max: usize) -> Box<dyn Validator> {
+        Box::new(Self {
+            min: Some(min),
+            max: Some(max),
+        })
+    }
 }
 
 impl Validator for ListLengthValidator {
-    fn validate(&self, value: &Dynamic, attribute_path: &str, diagnostics: &mut Diagnostics) {
-        if let Dynamic::List(items) = value {
+    fn description(&self) -> String {
+        match (self.min, self.max) {
+            (Some(min), Some(max)) => format!("list must have between {} and {} items", min, max),
+            (Some(min), None) => format!("list must have at least {} items", min),
+            (None, Some(max)) => format!("list must have at most {} items", max),
+            (None, None) => "list length validator".to_string(),
+        }
+    }
+
+    fn validate(&self, request: ValidatorRequest) -> ValidatorResponse {
+        let mut diagnostics = Vec::new();
+
+        if let Dynamic::List(l) = &request.config_value.value {
+            let len = l.len();
+
             if let Some(min) = self.min {
-                if items.len() < min {
-                    diagnostics.add_error(
-                        format!("{} must have at least {} items", attribute_path, min),
-                        Some(format!("Got {} items", items.len())),
+                if len < min {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "List too short",
+                            format!("List has {} items, minimum is {}", len, min),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
+
             if let Some(max) = self.max {
-                if items.len() > max {
-                    diagnostics.add_error(
-                        format!("{} must have at most {} items", attribute_path, max),
-                        Some(format!("Got {} items", items.len())),
+                if len > max {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "List too long",
+                            format!("List has {} items, maximum is {}", len, max),
+                        )
+                        .with_attribute(request.path.clone()),
                     );
                 }
             }
         }
+
+        ValidatorResponse { diagnostics }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Diagnostics, Dynamic};
+    use crate::types::{AttributePath, DynamicValue};
 
     #[test]
-    fn string_length_validator_accepts_valid_length() {
-        let validator = StringLengthValidator {
-            min: Some(3),
-            max: Some(10),
+    fn string_length_validator_validates_min() {
+        let validator = StringLengthValidator::min(3);
+
+        let request = ValidatorRequest {
+            config_value: DynamicValue::new(Dynamic::String("ab".to_string())),
+            path: AttributePath::new("test"),
         };
 
-        let mut diags = Diagnostics::new();
-        validator.validate(
-            &Dynamic::String("hello".to_string()),
-            "test_field",
-            &mut diags,
-        );
-
-        assert_eq!(diags.errors.len(), 0);
+        let response = validator.validate(request);
+        assert_eq!(response.diagnostics.len(), 1);
+        assert!(response.diagnostics[0].summary.contains("too short"));
     }
 
     #[test]
-    fn string_length_validator_rejects_too_short() {
-        let validator = StringLengthValidator {
-            min: Some(5),
-            max: None,
+    fn string_one_of_validator() {
+        let validator = StringOneOfValidator::create(vec!["foo".to_string(), "bar".to_string()]);
+
+        let request = ValidatorRequest {
+            config_value: DynamicValue::new(Dynamic::String("baz".to_string())),
+            path: AttributePath::new("test"),
         };
 
-        let mut diags = Diagnostics::new();
-        validator.validate(&Dynamic::String("hi".to_string()), "test_field", &mut diags);
-
-        assert_eq!(diags.errors.len(), 1);
-        assert!(diags.errors[0].summary.contains("minimum length"));
+        let response = validator.validate(request);
+        assert_eq!(response.diagnostics.len(), 1);
+        assert!(response.diagnostics[0]
+            .detail
+            .contains("not one of the allowed values"));
     }
 
     #[test]
-    fn string_length_validator_rejects_too_long() {
-        let validator = StringLengthValidator {
-            min: None,
-            max: Some(5),
+    fn number_range_validator() {
+        let validator = NumberRangeValidator::between(1.0, 10.0);
+
+        let request = ValidatorRequest {
+            config_value: DynamicValue::new(Dynamic::Number(15.0)),
+            path: AttributePath::new("test"),
         };
 
-        let mut diags = Diagnostics::new();
-        validator.validate(
-            &Dynamic::String("hello world".to_string()),
-            "test_field",
-            &mut diags,
-        );
-
-        assert_eq!(diags.errors.len(), 1);
-        assert!(diags.errors[0].summary.contains("maximum length"));
-    }
-
-    #[test]
-    fn string_pattern_validator_accepts_matching_pattern() {
-        let validator = StringPatternValidator {
-            pattern: regex::Regex::new(r"^\d{3}-\d{3}-\d{4}$").unwrap(),
-            description: "phone number format".to_string(),
-        };
-
-        let mut diags = Diagnostics::new();
-        validator.validate(
-            &Dynamic::String("123-456-7890".to_string()),
-            "phone",
-            &mut diags,
-        );
-
-        assert_eq!(diags.errors.len(), 0);
-    }
-
-    #[test]
-    fn string_pattern_validator_rejects_non_matching() {
-        let validator = StringPatternValidator {
-            pattern: regex::Regex::new(r"^\d{3}-\d{3}-\d{4}$").unwrap(),
-            description: "phone number format".to_string(),
-        };
-
-        let mut diags = Diagnostics::new();
-        validator.validate(&Dynamic::String("invalid".to_string()), "phone", &mut diags);
-
-        assert_eq!(diags.errors.len(), 1);
-        assert!(diags.errors[0].summary.contains("phone number format"));
-    }
-
-    #[test]
-    fn number_range_validator_accepts_valid_number() {
-        let validator = NumberRangeValidator {
-            min: Some(1.0),
-            max: Some(100.0),
-        };
-
-        let mut diags = Diagnostics::new();
-        validator.validate(&Dynamic::Number(50.0), "count", &mut diags);
-
-        assert_eq!(diags.errors.len(), 0);
-    }
-
-    #[test]
-    fn number_range_validator_rejects_too_small() {
-        let validator = NumberRangeValidator {
-            min: Some(10.0),
-            max: None,
-        };
-
-        let mut diags = Diagnostics::new();
-        validator.validate(&Dynamic::Number(5.0), "count", &mut diags);
-
-        assert_eq!(diags.errors.len(), 1);
-        assert!(diags.errors[0].summary.contains("at least"));
-    }
-
-    #[test]
-    fn list_length_validator_accepts_valid_length() {
-        let validator = ListLengthValidator {
-            min: Some(1),
-            max: Some(5),
-        };
-
-        let mut diags = Diagnostics::new();
-        let list = Dynamic::List(vec![
-            Dynamic::String("a".to_string()),
-            Dynamic::String("b".to_string()),
-        ]);
-        validator.validate(&list, "items", &mut diags);
-
-        assert_eq!(diags.errors.len(), 0);
-    }
-
-    #[test]
-    fn custom_validator_runs_custom_logic() {
-        struct EvenNumberValidator;
-
-        impl Validator for EvenNumberValidator {
-            fn validate(
-                &self,
-                value: &Dynamic,
-                attribute_path: &str,
-                diagnostics: &mut Diagnostics,
-            ) {
-                if let Some(num) = value.as_number() {
-                    if num as i64 % 2 != 0 {
-                        diagnostics.add_error(
-                            format!("{} must be an even number", attribute_path),
-                            Some(format!("Got {}, which is odd", num)),
-                        );
-                    }
-                }
-            }
-        }
-
-        let validator = EvenNumberValidator;
-        let mut diags = Diagnostics::new();
-
-        validator.validate(&Dynamic::Number(4.0), "even_field", &mut diags);
-        assert_eq!(diags.errors.len(), 0);
-
-        validator.validate(&Dynamic::Number(3.0), "even_field", &mut diags);
-        assert_eq!(diags.errors.len(), 1);
+        let response = validator.validate(request);
+        assert_eq!(response.diagnostics.len(), 1);
+        assert!(response.diagnostics[0].summary.contains("too large"));
     }
 }

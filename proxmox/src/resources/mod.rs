@@ -1,3 +1,4 @@
-pub mod realm;
+//! Resource implementations
 
-pub use realm::RealmResource;
+pub mod access;
+pub use access::RealmResource;

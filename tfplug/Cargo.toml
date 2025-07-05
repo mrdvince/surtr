@@ -21,12 +21,18 @@ tracing = { workspace = true }
 rustls = { workspace = true }
 regex = "1.11"
 async-trait = "0.1"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 tonic-build = "0.13"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-uuid = { version = "1.11", features = ["v4"] }
 futures = "0.3"
+uuid = { version = "1.11", features = ["v4"] }
+async-trait = "0.1"
 
+[[example]]
+name = "plan_modifier_example"
+path = "examples/plan_modifier_example.rs"

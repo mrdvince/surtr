@@ -20,6 +20,8 @@ reqwest = { workspace = true }
 url = { workspace = true }
 futures = "0.3"
 async-trait = { workspace = true }
+rustls = { workspace = true }
+urlencoding = "2.1"
 
 [dev-dependencies]
 mockito = { workspace = true }
