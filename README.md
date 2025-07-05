@@ -1,8 +1,7 @@
 # An OpenTofu/Terraform Provider for Proxmox
 
-> ⚠️ This is a learning and experimentation project to see what is required to write providers in a different language, essentially, if it can be done and what it would look like.
-
-> ⚠️ DON'T USE THIS, It's not the most consistent thing.
+> ⚠️ This is a learning and experimentation project to see what is required to write providers in a different language, essentially, if it can be done and what it would look like. 
+⚠️ DON'T USE THIS
 
 ## Requirements
 
@@ -67,19 +66,6 @@ output "proxmox_version" {
 }
 ```
 
-### Running with OpenTofu
-
-```bash
-# Initialize the provider
-tofu init
-
-# Plan changes
-tofu plan
-
-# Apply changes
-tofu apply
-```
-
 ## Provider Configuration
 
 | Argument | Type | Required | Description |
@@ -106,41 +92,3 @@ export PROXMOX_ENDPOINT="https://pve.example.com:8006"
 export PROXMOX_API_TOKEN="user@realm!tokenid=secret"
 export PROXMOX_INSECURE="false"
 ```
-
-With environment variables set, you can use a minimal provider configuration:
-```
-provider "proxmox" {
-  # Configuration will be read from environment variables
-}
-```
-
-Planned to add:
-- [ ] Resource: `proxmox_vm_qemu` - to manage VMs
-- [ ] Resource: `proxmox_realm` - manage authentication realms (OIDC, etc.)
-- [ ] Other things I use as I go
-
-## References
-- https://pve.proxmox.com/pve-docs/api-viewer/
-- https://github.com/opentofu/opentofu/tree/main/docs/plugin-protocol
-- https://github.com/hashicorp/terraform-plugin-go
-- https://github.com/hashicorp/terraform-plugin-framework  
-- https://github.com/hashicorp/terraform-provider-scaffolding-framework
-- https://github.com/hashicorp/terraform-provider-aws
-- https://developer.hashicorp.com/terraform/plugin/framework
-- https://developer.hashicorp.com/terraform/tutorials/providers-plugin-framework
-- https://developer.hashicorp.com/terraform/plugin/terraform-plugin-protocol
-
-
-## Written with Claude
-
-This provider was written with the help of Claude.
-
-Through this project, I learned:
-- How the Terraform Plugin Protocol works under the hood
-- gRPC
-- Refresher on my already "rusty" rust know-how
-- How/what it's like to "pair" with the LLMs.
-
-"Can you learn by building with an AI?"
-
-Yes.
