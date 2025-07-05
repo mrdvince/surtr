@@ -6,3 +6,4 @@
 iac/Taskfile.yml
 iac/*.tfvars
 iac/.terraform/
+iac/.envrc
