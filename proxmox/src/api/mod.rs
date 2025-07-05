@@ -4,8 +4,8 @@ pub mod access;
 pub mod client;
 pub mod common;
 pub mod error;
+pub mod nodes;
 pub mod pool;
-pub mod qemu;
 pub mod response;
 pub mod version;
 
@@ -16,6 +16,6 @@ pub use access::AccessApi;
 pub use client::*;
 pub use common::{
     deserialize_proxmox_bool_option, ApiErrorDetails, ApiErrorResponse, ApiQueryParams,
-    ApiResponse, PaginationParams, ProxmoxApiResource, ProxmoxBool,
+    ApiResponse, PaginationParams, ProxmoxApiResource, ProxmoxBool, TaskId,
 };
 pub use error::*;

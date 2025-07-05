@@ -1,6 +1,12 @@
 //! Test helpers for the Proxmox API
 
 #[cfg(test)]
+#[allow(dead_code)]
+pub fn create_test_client(url: &str) -> super::Client {
+    super::Client::new(url, "test@pam!test=secret", true).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::*;
 

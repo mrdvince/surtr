@@ -1,18 +1,19 @@
 //! QEMU VM resource implementation
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use tfplug::context::Context;
 use tfplug::resource::{
     ConfigureResourceRequest, ConfigureResourceResponse, CreateResourceRequest,
-    CreateResourceResponse, DeleteResourceRequest, DeleteResourceResponse, ImportResourceStateRequest,
-    ImportResourceStateResponse, ImportedResource, ReadResourceRequest, ReadResourceResponse, Resource,
-    ResourceMetadataRequest, ResourceMetadataResponse, ResourceSchemaRequest,
-    ResourceSchemaResponse, ResourceWithConfigure, ResourceWithImportState, UpdateResourceRequest,
-    UpdateResourceResponse, ValidateResourceConfigRequest, ValidateResourceConfigResponse,
+    CreateResourceResponse, DeleteResourceRequest, DeleteResourceResponse,
+    ImportResourceStateRequest, ImportResourceStateResponse, ImportedResource, ReadResourceRequest,
+    ReadResourceResponse, Resource, ResourceMetadataRequest, ResourceMetadataResponse,
+    ResourceSchemaRequest, ResourceSchemaResponse, ResourceWithConfigure, ResourceWithImportState,
+    UpdateResourceRequest, UpdateResourceResponse, ValidateResourceConfigRequest,
+    ValidateResourceConfigResponse,
 };
 use tfplug::schema::{AttributeBuilder, AttributeType, SchemaBuilder};
 use tfplug::types::{AttributePath, Diagnostic, Dynamic, DynamicValue};
-use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct QemuVmResource {
@@ -362,8 +363,10 @@ impl Resource for QemuVmResource {
             Ok((node, _vmid, create_request)) => {
                 match provider_data
                     .client
+                    .nodes()
+                    .node(&node)
                     .qemu()
-                    .create_vm(&node, &create_request)
+                    .create(create_request.vmid, &create_request)
                     .await
                 {
                     Ok(_task_id) => CreateResourceResponse {
@@ -398,7 +401,10 @@ impl Resource for QemuVmResource {
     async fn read(&self, _ctx: Context, request: ReadResourceRequest) -> ReadResourceResponse {
         let mut diagnostics = vec![];
 
-        let node = match request.current_state.get_string(&AttributePath::new("node")) {
+        let node = match request
+            .current_state
+            .get_string(&AttributePath::new("node"))
+        {
             Ok(node) => node,
             Err(_) => {
                 return ReadResourceResponse {
@@ -411,7 +417,10 @@ impl Resource for QemuVmResource {
             }
         };
 
-        let vmid = match request.current_state.get_number(&AttributePath::new("vmid")) {
+        let vmid = match request
+            .current_state
+            .get_number(&AttributePath::new("vmid"))
+        {
             Ok(vmid) => vmid as u32,
             Err(_) => {
                 return ReadResourceResponse {
@@ -441,7 +450,14 @@ impl Resource for QemuVmResource {
             }
         };
 
-        match provider_data.client.qemu().get_vm(&node, vmid).await {
+        match provider_data
+            .client
+            .nodes()
+            .node(&node)
+            .qemu()
+            .get_config(vmid)
+            .await
+        {
             Ok(vm_config) => {
                 let mut new_state = request.current_state.clone();
 
@@ -620,11 +636,13 @@ impl Resource for QemuVmResource {
             Ok(update_request) => {
                 match provider_data
                     .client
+                    .nodes()
+                    .node(&node)
                     .qemu()
-                    .update_vm(&node, vmid, &update_request)
+                    .update_config(vmid, &update_request)
                     .await
                 {
-                    Ok(()) => UpdateResourceResponse {
+                    Ok(_) => UpdateResourceResponse {
                         new_state: request.planned_state,
                         private: vec![],
                         diagnostics,
@@ -684,7 +702,14 @@ impl Resource for QemuVmResource {
             }
         };
 
-        match provider_data.client.qemu().delete_vm(&node, vmid).await {
+        match provider_data
+            .client
+            .nodes()
+            .node(&node)
+            .qemu()
+            .delete(vmid, false)
+            .await
+        {
             Ok(_) => DeleteResourceResponse { diagnostics },
             Err(e) => {
                 diagnostics.push(Diagnostic::error(
@@ -701,7 +726,7 @@ impl QemuVmResource {
     fn extract_vm_config(
         &self,
         config: &DynamicValue,
-    ) -> Result<(String, u32, crate::api::qemu::CreateVmRequest), Diagnostic> {
+    ) -> Result<(String, u32, crate::api::nodes::CreateQemuRequest), Diagnostic> {
         let node = config
             .get_string(&AttributePath::new("node"))
             .map_err(|_| Diagnostic::error("Missing node", "The 'node' attribute is required"))?;
@@ -751,7 +776,7 @@ impl QemuVmResource {
         let net2 = config.get_string(&AttributePath::new("net2")).ok();
         let net3 = config.get_string(&AttributePath::new("net3")).ok();
 
-        let create_request = crate::api::qemu::CreateVmRequest {
+        let create_request = crate::api::nodes::CreateQemuRequest {
             vmid,
             name,
             cores,
@@ -862,7 +887,7 @@ impl QemuVmResource {
     fn build_update_request(
         &self,
         config: &DynamicValue,
-    ) -> Result<crate::api::qemu::UpdateVmRequest, Diagnostic> {
+    ) -> Result<crate::api::nodes::UpdateQemuRequest, Diagnostic> {
         let name = config.get_string(&AttributePath::new("name")).ok();
         let cores = config
             .get_number(&AttributePath::new("cores"))
@@ -903,7 +928,7 @@ impl QemuVmResource {
         let net2 = config.get_string(&AttributePath::new("net2")).ok();
         let net3 = config.get_string(&AttributePath::new("net3")).ok();
 
-        Ok(crate::api::qemu::UpdateVmRequest {
+        Ok(crate::api::nodes::UpdateQemuRequest {
             name,
             cores,
             sockets,
@@ -1097,3 +1122,7 @@ impl ResourceWithImportState for QemuVmResource {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "./resource_vm_test.rs"]
+mod resource_vm_test;

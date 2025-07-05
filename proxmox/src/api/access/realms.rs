@@ -191,7 +191,7 @@ impl super::super::Client {
             groups_autocreate: config.groups_autocreate,
         };
 
-        self.post_no_response(path, &request).await
+        self.post::<(), _>(path, &request).await.map(|_| ())
     }
 
     /// Update an existing realm
@@ -211,13 +211,13 @@ impl super::super::Client {
             groups_autocreate: config.groups_autocreate,
         };
 
-        self.put_no_response(&path, &request).await
+        self.put::<(), _>(&path, &request).await.map(|_| ())
     }
 
     /// Delete a realm
     pub async fn delete_realm(&self, realm: &str) -> Result<(), super::super::ApiError> {
         let path = RealmConfig::resource_path(realm);
-        self.delete(&path).await
+        self.delete::<()>(&path).await.map(|_| ())
     }
 }
 
@@ -259,8 +259,9 @@ impl<'a> RealmsApi<'a> {
     /// POST /api2/json/access/domains
     pub async fn create(&self, request: &CreateRealmRequest) -> Result<(), super::super::ApiError> {
         self.client
-            .post_no_response("/api2/json/access/domains", request)
+            .post::<(), _>("/api2/json/access/domains", request)
             .await
+            .map(|_| ())
     }
 
     /// PUT /api2/json/access/domains/{realm}
@@ -270,14 +271,16 @@ impl<'a> RealmsApi<'a> {
         request: &UpdateRealmRequest,
     ) -> Result<(), super::super::ApiError> {
         self.client
-            .put_no_response(&format!("/api2/json/access/domains/{}", realm), request)
+            .put::<(), _>(&format!("/api2/json/access/domains/{}", realm), request)
             .await
+            .map(|_| ())
     }
 
     /// DELETE /api2/json/access/domains/{realm}
     pub async fn delete(&self, realm: &str) -> Result<(), super::super::ApiError> {
         self.client
-            .delete(&format!("/api2/json/access/domains/{}", realm))
+            .delete::<()>(&format!("/api2/json/access/domains/{}", realm))
             .await
+            .map(|_| ())
     }
 }

@@ -1,71 +1,89 @@
 //! QEMU/KVM virtual machine API implementation
 
-use crate::api::Client;
+use crate::api::{common::TaskId, error::ApiError, Client};
 use serde::{Deserialize, Serialize};
 
 /// QEMU API providing virtual machine operations
 pub struct QemuApi<'a> {
     client: &'a Client,
+    node: String,
 }
 
 impl<'a> QemuApi<'a> {
-    pub fn new(client: &'a Client) -> Self {
-        Self { client }
+    pub fn new(client: &'a Client, node: &str) -> Self {
+        Self {
+            client,
+            node: node.to_string(),
+        }
     }
 
     /// GET /api2/json/nodes/{node}/qemu
-    pub async fn list_vms(&self, node: &str) -> Result<Vec<VmListItem>, crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu", node);
+    pub async fn list(&self) -> Result<Vec<QemuVmInfo>, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu", self.node);
         self.client.get(&path).await
     }
 
     /// GET /api2/json/nodes/{node}/qemu/{vmid}/config
-    pub async fn get_vm(&self, node: &str, vmid: u32) -> Result<VmConfig, crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu/{}/config", node, vmid);
+    pub async fn get_config(&self, vmid: u32) -> Result<QemuConfig, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu/{}/config", self.node, vmid);
         self.client.get(&path).await
     }
 
     /// POST /api2/json/nodes/{node}/qemu
-    pub async fn create_vm(
+    pub async fn create(
         &self,
-        node: &str,
-        config: &CreateVmRequest,
-    ) -> Result<String, crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu", node);
-        self.client.post(&path, config).await
+        _vmid: u32,
+        request: &CreateQemuRequest,
+    ) -> Result<TaskId, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu", self.node);
+        self.client.post(&path, request).await
     }
 
-    /// PUT /api2/json/nodes/{node}/qemu/{vmid}/config
-    pub async fn update_vm(
+    /// POST /api2/json/nodes/{node}/qemu/{vmid}/config
+    pub async fn update_config(
         &self,
-        node: &str,
         vmid: u32,
-        config: &UpdateVmRequest,
-    ) -> Result<(), crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu/{}/config", node, vmid);
-        self.client.put_no_response(&path, config).await
+        request: &UpdateQemuRequest,
+    ) -> Result<Option<TaskId>, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu/{}/config", self.node, vmid);
+        self.client.post(&path, request).await
     }
 
     /// DELETE /api2/json/nodes/{node}/qemu/{vmid}
-    pub async fn delete_vm(&self, node: &str, vmid: u32) -> Result<String, crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu/{}", node, vmid);
-        self.client.delete(&path).await.map(|()| String::new())
+    pub async fn delete(&self, vmid: u32, purge: bool) -> Result<TaskId, ApiError> {
+        let path = if purge {
+            format!("/api2/json/nodes/{}/qemu/{}?purge=1", self.node, vmid)
+        } else {
+            format!("/api2/json/nodes/{}/qemu/{}", self.node, vmid)
+        };
+        self.client.delete(&path).await
+    }
+
+    /// POST /api2/json/nodes/{node}/qemu/{vmid}/status/start
+    pub async fn start(&self, vmid: u32) -> Result<TaskId, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu/{}/status/start", self.node, vmid);
+        self.client.post(&path, &()).await
+    }
+
+    /// POST /api2/json/nodes/{node}/qemu/{vmid}/status/stop
+    pub async fn stop(&self, vmid: u32) -> Result<TaskId, ApiError> {
+        let path = format!("/api2/json/nodes/{}/qemu/{}/status/stop", self.node, vmid);
+        self.client.post(&path, &()).await
     }
 
     /// GET /api2/json/nodes/{node}/qemu/{vmid}/status/current
-    pub async fn get_vm_status(
-        &self,
-        node: &str,
-        vmid: u32,
-    ) -> Result<VmStatus, crate::api::ApiError> {
-        let path = format!("/api2/json/nodes/{}/qemu/{}/status/current", node, vmid);
+    pub async fn get_status(&self, vmid: u32) -> Result<QemuStatus, ApiError> {
+        let path = format!(
+            "/api2/json/nodes/{}/qemu/{}/status/current",
+            self.node, vmid
+        );
         self.client.get(&path).await
     }
 }
 
 /// Item in VM list response
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VmListItem {
+pub struct QemuVmInfo {
     pub vmid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -102,7 +120,7 @@ pub struct VmListItem {
 
 /// VM configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VmConfig {
+pub struct QemuConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acpi: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,8 +328,8 @@ pub struct VmConfig {
 }
 
 /// Request for creating a VM
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateVmRequest {
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CreateQemuRequest {
     pub vmid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acpi: Option<bool>,
@@ -518,8 +536,8 @@ pub struct CreateVmRequest {
 }
 
 /// Request for updating a VM
-#[derive(Debug, Clone, Serialize)]
-pub struct UpdateVmRequest {
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UpdateQemuRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acpi: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -732,7 +750,7 @@ pub struct UpdateVmRequest {
 
 /// VM status information
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VmStatus {
+pub struct QemuStatus {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ha: Option<HaStatus>,
@@ -801,3 +819,7 @@ pub struct BalloonInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_update: Option<u64>,
 }
+
+#[cfg(test)]
+#[path = "./qemu_test.rs"]
+mod qemu_test;

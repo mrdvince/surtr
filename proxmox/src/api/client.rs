@@ -70,53 +70,6 @@ impl Client {
         self.get(&full_path).await
     }
 
-    /// Execute a POST request expecting no response body
-    pub async fn post_no_response<B: Serialize>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<(), ApiError> {
-        let body_clone = body;
-        self.execute_delete_with_retry(
-            || async {
-                let url = format!("{}{}", self.inner.base_url, path);
-
-                self.inner
-                    .http_client
-                    .post(&url)
-                    .header(AUTHORIZATION, &self.inner.auth_header)
-                    .json(body_clone)
-                    .send()
-                    .await
-            },
-            path,
-        )
-        .await
-    }
-
-    /// Execute a PUT request expecting no response body
-    pub async fn put_no_response<B: Serialize>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<(), ApiError> {
-        let body_clone = body;
-        self.execute_delete_with_retry(
-            || async {
-                let url = format!("{}{}", self.inner.base_url, path);
-
-                self.inner
-                    .http_client
-                    .put(&url)
-                    .header(AUTHORIZATION, &self.inner.auth_header)
-                    .json(body_clone)
-                    .send()
-                    .await
-            },
-            path,
-        )
-        .await
-    }
     /// Create a new API client with default configuration
     pub fn new(endpoint: &str, api_token: &str, insecure: bool) -> Result<Self, ApiError> {
         Self::with_config(endpoint, api_token, insecure, RetryConfig::default())
@@ -229,14 +182,14 @@ impl Client {
         crate::api::access::AccessApi::new(self)
     }
 
-    /// QEMU API operations
-    pub fn qemu(&self) -> crate::api::qemu::QemuApi<'_> {
-        crate::api::qemu::QemuApi::new(self)
+    /// Nodes API operations
+    pub fn nodes(&self) -> crate::api::nodes::NodesApi<'_> {
+        crate::api::nodes::NodesApi::new(self)
     }
 
     /// Execute a DELETE request with retry logic
-    pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
-        self.execute_delete_with_retry(
+    pub async fn delete<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, ApiError> {
+        self.execute_with_retry(
             || async {
                 let url = format!("{}{}", self.inner.base_url, path);
 
@@ -341,77 +294,6 @@ impl Client {
                 }
             },
         }
-    }
-
-    /// Execute request with retry logic for operations that return no body
-    async fn execute_delete_with_retry<F, Fut>(
-        &self,
-        request_fn: F,
-        path: &str,
-    ) -> Result<(), ApiError>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
-    {
-        let mut attempt = 0;
-        let mut last_error = None;
-
-        while attempt <= self.inner.retry_config.max_retries {
-            if attempt > 0 {
-                let backoff = std::cmp::min(
-                    self.inner.retry_config.initial_backoff_ms * (2_u64.pow(attempt - 1)),
-                    self.inner.retry_config.max_backoff_ms,
-                );
-                tracing::debug!(
-                    "Retrying request to {} after {}ms (attempt {})",
-                    path,
-                    backoff,
-                    attempt
-                );
-                tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
-            }
-
-            match request_fn().await {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status.is_success() {
-                        self.inner.pool_manager.record_request(true).await;
-                        return Ok(());
-                    }
-
-                    self.inner.pool_manager.record_request(false).await;
-
-                    if status == reqwest::StatusCode::UNAUTHORIZED {
-                        return Err(ApiError::AuthError);
-                    }
-
-                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        last_error = Some(ApiError::RateLimited);
-                    } else if status.is_server_error() {
-                        last_error = Some(ApiError::ServiceUnavailable);
-                    } else {
-                        return self.handle_error_response(response).await;
-                    }
-                }
-                Err(e) => {
-                    self.inner.pool_manager.record_request(false).await;
-
-                    if e.is_timeout() {
-                        last_error =
-                            Some(ApiError::Timeout(self.inner.retry_config.timeout_seconds));
-                    } else if e.is_connect() || e.is_request() {
-                        last_error = Some(ApiError::ServiceUnavailable);
-                    } else {
-                        return Err(ApiError::RequestError(e));
-                    }
-                }
-            }
-
-            attempt += 1;
-        }
-
-        Err(last_error.unwrap_or(ApiError::ServiceUnavailable))
     }
 
     /// Handle error response

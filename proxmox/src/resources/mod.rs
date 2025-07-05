@@ -1,7 +1,7 @@
 //! Resource implementations
 
 pub mod access;
-pub mod qemu;
+pub mod nodes;
 
 pub use access::RealmResource;
-pub use qemu::QemuVmResource;
+pub use nodes::QemuVmResource;

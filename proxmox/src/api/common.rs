@@ -3,6 +3,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct TaskId(pub String);
+
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
     pub data: T,
