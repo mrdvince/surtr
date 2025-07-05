@@ -5,6 +5,7 @@ pub mod client;
 pub mod common;
 pub mod error;
 pub mod pool;
+pub mod qemu;
 pub mod response;
 pub mod version;
 

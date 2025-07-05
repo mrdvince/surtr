@@ -229,6 +229,11 @@ impl Client {
         crate::api::access::AccessApi::new(self)
     }
 
+    /// QEMU API operations
+    pub fn qemu(&self) -> crate::api::qemu::QemuApi<'_> {
+        crate::api::qemu::QemuApi::new(self)
+    }
+
     /// Execute a DELETE request with retry logic
     pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
         self.execute_delete_with_retry(

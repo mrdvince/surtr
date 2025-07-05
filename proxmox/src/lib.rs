@@ -230,6 +230,13 @@ impl Provider for ProxmoxProvider {
             }) as ResourceFactory,
         );
 
+        resources.insert(
+            "proxmox_qemu_vm".to_string(),
+            Box::new(|| {
+                Box::new(resources::QemuVmResource::new()) as Box<dyn tfplug::ResourceWithConfigure>
+            }) as ResourceFactory,
+        );
+
         resources
     }
 
