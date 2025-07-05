@@ -279,7 +279,7 @@ impl Client {
         response: reqwest::Response,
     ) -> Result<T, ApiError> {
         let text = response.text().await?;
-        tracing::trace!("API response body: {}", text);
+        tracing::debug!("API response body: {}", text);
 
         match serde_json::from_str::<ApiResponse<T>>(&text) {
             Ok(wrapper) => Ok(wrapper.data),

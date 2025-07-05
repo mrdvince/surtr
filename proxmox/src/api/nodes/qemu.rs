@@ -1,7 +1,47 @@
 //! QEMU/KVM virtual machine API implementation
 
 use crate::api::{common::TaskId, error::ApiError, Client};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_optional_string_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrU64 {
+        String(String),
+        U64(u64),
+    }
+
+    match Option::<StringOrU64>::deserialize(deserializer)? {
+        Some(StringOrU64::String(s)) => {
+            s.parse::<u64>().map(Some).map_err(serde::de::Error::custom)
+        }
+        Some(StringOrU64::U64(u)) => Ok(Some(u)),
+        None => Ok(None),
+    }
+}
+
+fn deserialize_optional_string_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrU32 {
+        String(String),
+        U32(u32),
+    }
+
+    match Option::<StringOrU32>::deserialize(deserializer)? {
+        Some(StringOrU32::String(s)) => {
+            s.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
+        }
+        Some(StringOrU32::U32(u)) => Ok(Some(u)),
+        None => Ok(None),
+    }
+}
 
 /// QEMU API providing virtual machine operations
 pub struct QemuApi<'a> {
@@ -139,7 +179,11 @@ pub struct QemuConfig {
     pub bootdisk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string_u32",
+        default
+    )]
     pub cores: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<String>,
@@ -177,7 +221,11 @@ pub struct QemuConfig {
     pub lock: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string_u64",
+        default
+    )]
     pub memory: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrate_downtime: Option<f64>,
@@ -795,7 +843,27 @@ pub struct QemuStatus {
 /// HA status information
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HaStatus {
+    #[serde(deserialize_with = "deserialize_bool_from_int")]
     pub managed: bool,
+}
+
+fn deserialize_bool_from_int<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrInt {
+        Bool(bool),
+        Int(u8),
+    }
+
+    match BoolOrInt::deserialize(deserializer)? {
+        BoolOrInt::Bool(b) => Ok(b),
+        BoolOrInt::Int(0) => Ok(false),
+        BoolOrInt::Int(1) => Ok(true),
+        BoolOrInt::Int(_) => Err(serde::de::Error::custom("expected 0 or 1")),
+    }
 }
 
 /// Balloon memory information

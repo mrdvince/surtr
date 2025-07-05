@@ -290,7 +290,7 @@ impl Resource for QemuVmResource {
 
         if let Ok(vmid) = request.config.get_number(&AttributePath::new("vmid")) {
             let vmid_int = vmid as u32;
-            if vmid_int < 100 || vmid_int > 999999999 {
+            if !(100..=999999999).contains(&vmid_int) {
                 diagnostics.push(Diagnostic::error(
                     "Invalid VMID",
                     "VMID must be between 100 and 999999999",
@@ -299,7 +299,7 @@ impl Resource for QemuVmResource {
         }
 
         if let Ok(cores) = request.config.get_number(&AttributePath::new("cores")) {
-            if cores < 1.0 || cores > 128.0 {
+            if !(1.0..=128.0).contains(&cores) {
                 diagnostics.push(Diagnostic::error(
                     "Invalid cores",
                     "Cores must be between 1 and 128",
@@ -308,7 +308,7 @@ impl Resource for QemuVmResource {
         }
 
         if let Ok(sockets) = request.config.get_number(&AttributePath::new("sockets")) {
-            if sockets < 1.0 || sockets > 4.0 {
+            if !(1.0..=4.0).contains(&sockets) {
                 diagnostics.push(Diagnostic::error(
                     "Invalid sockets",
                     "Sockets must be between 1 and 4",
@@ -317,7 +317,7 @@ impl Resource for QemuVmResource {
         }
 
         if let Ok(memory) = request.config.get_number(&AttributePath::new("memory")) {
-            if memory < 16.0 || memory > 8388608.0 {
+            if !(16.0..=8388608.0).contains(&memory) {
                 diagnostics.push(Diagnostic::error(
                     "Invalid memory",
                     "Memory must be between 16 MB and 8 TB",
@@ -557,7 +557,7 @@ impl Resource for QemuVmResource {
                 }
             }
             Err(crate::api::ApiError::ApiError { message, .. })
-                if message.contains("does not exist") =>
+                if message.contains("does not exist") || message.contains("not found") =>
             {
                 ReadResourceResponse {
                     new_state: None,
@@ -1091,7 +1091,7 @@ impl ResourceWithImportState for QemuVmResource {
         let node = parts[0];
         let vmid_str = parts[1];
 
-        let vmid = match vmid_str.parse::<f64>() {
+        let vmid = match vmid_str.parse::<u32>() {
             Ok(vmid) => vmid,
             Err(_) => {
                 diagnostics.push(Diagnostic::error(
@@ -1106,9 +1106,73 @@ impl ResourceWithImportState for QemuVmResource {
             }
         };
 
+        // Fetch the VM configuration from the API
+        let provider_data = match &self.provider_data {
+            Some(data) => data,
+            None => {
+                diagnostics.push(Diagnostic::error(
+                    "Provider not configured",
+                    "Unable to import resource without provider configuration",
+                ));
+                return ImportResourceStateResponse {
+                    imported_resources: vec![],
+                    diagnostics,
+                    deferred: None,
+                };
+            }
+        };
+
+        let config = match provider_data
+            .client
+            .nodes()
+            .node(node)
+            .qemu()
+            .get_config(vmid)
+            .await
+        {
+            Ok(config) => config,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    "Failed to fetch VM configuration",
+                    format!("Error fetching VM {}: {}", vmid, e),
+                ));
+                return ImportResourceStateResponse {
+                    imported_resources: vec![],
+                    diagnostics,
+                    deferred: None,
+                };
+            }
+        };
+
+        // Build state from the fetched configuration
         let mut state = DynamicValue::new(Dynamic::Map(HashMap::new()));
         let _ = state.set_string(&AttributePath::new("node"), node.to_string());
-        let _ = state.set_number(&AttributePath::new("vmid"), vmid);
+        let _ = state.set_number(&AttributePath::new("vmid"), vmid as f64);
+
+        if let Some(name) = &config.name {
+            let _ = state.set_string(&AttributePath::new("name"), name.clone());
+        }
+        if let Some(cores) = config.cores {
+            let _ = state.set_number(&AttributePath::new("cores"), cores as f64);
+        }
+        if let Some(memory) = config.memory {
+            let _ = state.set_number(&AttributePath::new("memory"), memory as f64);
+        }
+        if let Some(sockets) = config.sockets {
+            let _ = state.set_number(&AttributePath::new("sockets"), sockets as f64);
+        }
+        if let Some(cpu) = &config.cpu {
+            let _ = state.set_string(&AttributePath::new("cpu"), cpu.clone());
+        }
+        if let Some(bios) = &config.bios {
+            let _ = state.set_string(&AttributePath::new("bios"), bios.clone());
+        }
+        if let Some(ostype) = &config.ostype {
+            let _ = state.set_string(&AttributePath::new("ostype"), ostype.clone());
+        }
+        if let Some(description) = &config.description {
+            let _ = state.set_string(&AttributePath::new("description"), description.clone());
+        }
 
         ImportResourceStateResponse {
             imported_resources: vec![ImportedResource {

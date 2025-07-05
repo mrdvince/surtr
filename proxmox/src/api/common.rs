@@ -167,3 +167,71 @@ pub struct ApiListResponse<T> {
     pub data: Vec<T>,
     pub total: Option<u32>,
 }
+
+pub mod string_or_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => serializer.serialize_some(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrU64 {
+            String(String),
+            U64(u64),
+        }
+
+        match Option::<StringOrU64>::deserialize(deserializer)? {
+            Some(StringOrU64::String(s)) => {
+                s.parse::<u64>().map(Some).map_err(serde::de::Error::custom)
+            }
+            Some(StringOrU64::U64(u)) => Ok(Some(u)),
+            None => Ok(None),
+        }
+    }
+}
+
+pub mod string_or_u32 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<u32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => serializer.serialize_some(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrU32 {
+            String(String),
+            U32(u32),
+        }
+
+        match Option::<StringOrU32>::deserialize(deserializer)? {
+            Some(StringOrU32::String(s)) => {
+                s.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
+            }
+            Some(StringOrU32::U32(u)) => Ok(Some(u)),
+            None => Ok(None),
+        }
+    }
+}
