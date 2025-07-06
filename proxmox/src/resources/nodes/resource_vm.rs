@@ -455,8 +455,9 @@ impl Resource for QemuVmResource {
                             "Failed to create VM",
                             format!("API error: {}", e),
                         ));
+                        // Return empty state to indicate creation failed
                         CreateResourceResponse {
-                            new_state: request.planned_state,
+                            new_state: DynamicValue::new(Dynamic::Map(HashMap::new())),
                             private: vec![],
                             diagnostics,
                         }
@@ -465,8 +466,9 @@ impl Resource for QemuVmResource {
             }
             Err(diag) => {
                 diagnostics.push(diag);
+                // Return empty state to indicate creation failed
                 CreateResourceResponse {
-                    new_state: request.planned_state,
+                    new_state: DynamicValue::new(Dynamic::Map(HashMap::new())),
                     private: vec![],
                     diagnostics,
                 }
