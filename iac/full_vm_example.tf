@@ -10,6 +10,7 @@ resource "proxmox_qemu_vm" "this" {
 
   bios = "ovmf"
   boot = "order=scsi0;ide2;net0"
+  efidisk0 = "local-lvm:1,format=qcow2"  # Required for OVMF BIOS
 
   scsihw      = "virtio-scsi-pci"
   ostype      = "l26"
@@ -34,11 +35,14 @@ resource "proxmox_qemu_vm" "web_server" {
   cores  = 1
   memory = 1024
   cpu    = "x86-64-v2-AES"
+  
+  # Note: iothread requires virtio-scsi-single controller
+  scsihw = "virtio-scsi-single"  # Added to support iothread
   scsi0  = "local-lvm:10,format=raw,iothread=1"
 
   # Network - Multiple interfaces
   net0 = "virtio,bridge=vmbr0,tag=50"
-  net1 = "virtio,bridge=vmbr1,tag=100"
+  net1 = "virtio,bridge=vmbr0,tag=100"  # Changed from vmbr1 to vmbr0
 
   ciuser    = "webadmin"
   sshkeys   = file("~/.ssh/devkey.pub")

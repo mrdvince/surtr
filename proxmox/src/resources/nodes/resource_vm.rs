@@ -24,6 +24,54 @@ impl QemuVmResource {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn validate_iothread(&self, config: &DynamicValue, diagnostics: &mut Vec<Diagnostic>) {
+        // Check SCSI disks with iothread
+        for i in 0..=30 {
+            let disk_key = format!("scsi{}", i);
+            if let Ok(disk_config) = config.get_string(&AttributePath::new(&disk_key)) {
+                if disk_config.contains("iothread=1") || disk_config.contains("iothread=true") {
+                    // Check if scsihw is virtio-scsi-single
+                    let scsihw = config
+                        .get_string(&AttributePath::new("scsihw"))
+                        .unwrap_or_else(|_| "lsi".to_string());
+
+                    if scsihw != "virtio-scsi-single" {
+                        diagnostics.push(Diagnostic::warning(
+                            "iothread requires virtio-scsi-single",
+                            format!("Disk {} has iothread enabled but scsihw is '{}'. iothread is only valid with scsihw='virtio-scsi-single'", disk_key, scsihw),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check SATA disks (iothread not supported)
+        for i in 0..=5 {
+            let disk_key = format!("sata{}", i);
+            if let Ok(disk_config) = config.get_string(&AttributePath::new(&disk_key)) {
+                if disk_config.contains("iothread=1") || disk_config.contains("iothread=true") {
+                    diagnostics.push(Diagnostic::warning(
+                        "iothread not supported for SATA",
+                        format!("Disk {} has iothread enabled but iothread is not supported for SATA disks. Use SCSI with virtio-scsi-single or VirtIO disks instead.", disk_key),
+                    ));
+                }
+            }
+        }
+
+        // Check IDE disks (iothread not supported)
+        for i in 0..=3 {
+            let disk_key = format!("ide{}", i);
+            if let Ok(disk_config) = config.get_string(&AttributePath::new(&disk_key)) {
+                if disk_config.contains("iothread=1") || disk_config.contains("iothread=true") {
+                    diagnostics.push(Diagnostic::warning(
+                        "iothread not supported for IDE",
+                        format!("Disk {} has iothread enabled but iothread is not supported for IDE disks. Use SCSI with virtio-scsi-single or VirtIO disks instead.", disk_key),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -213,6 +261,12 @@ impl Resource for QemuVmResource {
                     .build(),
             )
             .attribute(
+                AttributeBuilder::new("efidisk0", AttributeType::String)
+                    .description("EFI disk configuration (e.g., 'local-lvm:1,format=qcow2')")
+                    .optional()
+                    .build(),
+            )
+            .attribute(
                 AttributeBuilder::new("net0", AttributeType::String)
                     .description("Network interface 0 configuration")
                     .optional()
@@ -338,7 +392,23 @@ impl Resource for QemuVmResource {
                     "BIOS must be either 'seabios' or 'ovmf'",
                 ));
             }
+
+            // Validate OVMF requires efidisk
+            if bios == "ovmf"
+                && request
+                    .config
+                    .get_string(&AttributePath::new("efidisk0"))
+                    .is_err()
+            {
+                diagnostics.push(Diagnostic::warning(
+                    "OVMF requires EFI disk",
+                    "When using OVMF BIOS, you should configure efidisk0 (e.g., efidisk0 = \"local-lvm:1,format=qcow2\"). Without it, a temporary EFI vars disk will be used.",
+                ));
+            }
         }
+
+        // Validate iothread usage
+        self.validate_iothread(&request.config, &mut diagnostics);
 
         ValidateResourceConfigResponse { diagnostics }
     }
@@ -540,6 +610,9 @@ impl Resource for QemuVmResource {
                 if let Some(sata0) = vm_config.sata0 {
                     let _ = new_state.set_string(&AttributePath::new("sata0"), sata0);
                 }
+                if let Some(efidisk0) = vm_config.efidisk0 {
+                    let _ = new_state.set_string(&AttributePath::new("efidisk0"), efidisk0);
+                }
 
                 if let Some(net0) = vm_config.net0 {
                     let _ = new_state.set_string(&AttributePath::new("net0"), net0);
@@ -562,8 +635,11 @@ impl Resource for QemuVmResource {
                     new_identity: None,
                 }
             }
-            Err(crate::api::ApiError::ApiError { message, .. })
-                if message.contains("does not exist") || message.contains("not found") =>
+            Err(crate::api::ApiError::ApiError {
+                status, message, ..
+            }) if status == 404
+                || message.contains("does not exist")
+                || message.contains("not found") =>
             {
                 ReadResourceResponse {
                     new_state: None,
@@ -571,6 +647,51 @@ impl Resource for QemuVmResource {
                     private: request.private,
                     deferred: None,
                     new_identity: None,
+                }
+            }
+            Err(crate::api::ApiError::ServiceUnavailable) => {
+                // When a VM doesn't exist, Proxmox might return ServiceUnavailable
+                // We should check if the VM actually exists by listing VMs
+                match provider_data.client.nodes().node(&node).qemu().list().await {
+                    Ok(vms) => {
+                        if vms.iter().any(|vm| vm.vmid == vmid) {
+                            // VM exists but service is temporarily unavailable
+                            diagnostics.push(Diagnostic::error(
+                                "Failed to read VM",
+                                "Service temporarily unavailable, please try again",
+                            ));
+                            ReadResourceResponse {
+                                new_state: Some(request.current_state),
+                                diagnostics,
+                                private: request.private,
+                                deferred: None,
+                                new_identity: None,
+                            }
+                        } else {
+                            // VM doesn't exist, remove from state
+                            ReadResourceResponse {
+                                new_state: None,
+                                diagnostics,
+                                private: request.private,
+                                deferred: None,
+                                new_identity: None,
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Can't determine if VM exists, keep current state and report error
+                        diagnostics.push(Diagnostic::error(
+                            "Failed to read VM",
+                            "Service unavailable and unable to verify VM existence",
+                        ));
+                        ReadResourceResponse {
+                            new_state: Some(request.current_state),
+                            diagnostics,
+                            private: request.private,
+                            deferred: None,
+                            new_identity: None,
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -708,14 +829,41 @@ impl Resource for QemuVmResource {
             }
         };
 
-        match provider_data
-            .client
-            .nodes()
-            .node(&node)
-            .qemu()
-            .delete(vmid, false)
-            .await
-        {
+        // Check if VM is running before attempting deletion
+        let qemu_api = provider_data.client.nodes().node(&node).qemu();
+
+        match qemu_api.get_status(vmid).await {
+            Ok(status) => {
+                // If VM is running, stop it first
+                if status.status == "running" {
+                    match qemu_api.stop(vmid).await {
+                        Ok(_) => {
+                            // Wait for VM to stop (5 seconds should be enough for most cases)
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                        Err(e) => {
+                            diagnostics.push(Diagnostic::warning(
+                                "Failed to stop VM",
+                                format!("Could not stop VM before deletion: {}. Attempting deletion anyway.", e),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // If we can't get status, log a warning but proceed with deletion
+                diagnostics.push(Diagnostic::warning(
+                    "Could not check VM status",
+                    format!(
+                        "Failed to check if VM is running: {}. Attempting deletion anyway.",
+                        e
+                    ),
+                ));
+            }
+        }
+
+        // Now attempt to delete the VM
+        match qemu_api.delete(vmid, false).await {
             Ok(_) => DeleteResourceResponse { diagnostics },
             Err(e) => {
                 diagnostics.push(Diagnostic::error(
@@ -777,6 +925,7 @@ impl QemuVmResource {
         let ide0 = config.get_string(&AttributePath::new("ide0")).ok();
         let ide2 = config.get_string(&AttributePath::new("ide2")).ok();
         let sata0 = config.get_string(&AttributePath::new("sata0")).ok();
+        let efidisk0 = config.get_string(&AttributePath::new("efidisk0")).ok();
 
         let net0 = config.get_string(&AttributePath::new("net0")).ok();
         let net1 = config.get_string(&AttributePath::new("net1")).ok();
@@ -822,7 +971,7 @@ impl QemuVmResource {
             cdrom: None,
             cpulimit: None,
             cpuunits: None,
-            efidisk0: None,
+            efidisk0,
             freeze: None,
             hookscript: None,
             hotplug: None,
@@ -930,6 +1079,7 @@ impl QemuVmResource {
         let ide0 = config.get_string(&AttributePath::new("ide0")).ok();
         let ide2 = config.get_string(&AttributePath::new("ide2")).ok();
         let sata0 = config.get_string(&AttributePath::new("sata0")).ok();
+        let efidisk0 = config.get_string(&AttributePath::new("efidisk0")).ok();
 
         let net0 = config.get_string(&AttributePath::new("net0")).ok();
         let net1 = config.get_string(&AttributePath::new("net1")).ok();
@@ -975,7 +1125,7 @@ impl QemuVmResource {
             cpuunits: None,
             delete: None,
             digest: None,
-            efidisk0: None,
+            efidisk0,
             freeze: None,
             hookscript: None,
             hotplug: None,
@@ -1180,6 +1330,9 @@ impl ResourceWithImportState for QemuVmResource {
         }
         if let Some(description) = &config.description {
             let _ = state.set_string(&AttributePath::new("description"), description.clone());
+        }
+        if let Some(efidisk0) = &config.efidisk0 {
+            let _ = state.set_string(&AttributePath::new("efidisk0"), efidisk0.clone());
         }
 
         ImportResourceStateResponse {

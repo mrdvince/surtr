@@ -415,7 +415,23 @@ mod tests {
     #[tokio::test]
     async fn test_delete_successful() {
         let mut server = Server::new_async().await;
-        let _m = server
+
+        // Mock the status check - VM is stopped
+        let _m_status = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/status/current")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "status": "stopped"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_delete = server
             .mock("DELETE", "/api2/json/nodes/pve/qemu/100")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -440,6 +456,68 @@ mod tests {
 
         let response = resource.delete(ctx, request).await;
         assert!(response.diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_running_vm() {
+        let mut server = Server::new_async().await;
+
+        // Mock the status check - VM is running
+        let _m_status = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/status/current")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "status": "running"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        // Mock the stop call
+        let _m_stop = server
+            .mock("POST", "/api2/json/nodes/pve/qemu/100/status/stop")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": "UPID:pve:00001234:00000000:5F000000:qmstop:100:root@pam:"
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_delete = server
+            .mock("DELETE", "/api2/json/nodes/pve/qemu/100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": "UPID:pve:00001234:00000000:5F000000:qmdestroy:100:root@pam:"
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut resource = QemuVmResource::new();
+        resource.provider_data = Some(create_test_provider_data(&server.url()));
+
+        let ctx = Context::new();
+        let request = DeleteResourceRequest {
+            type_name: "proxmox_qemu_vm".to_string(),
+            prior_state: create_test_dynamic_value(),
+            planned_private: vec![],
+            provider_meta: Some(DynamicValue::null()),
+        };
+
+        let response = resource.delete(ctx, request).await;
+        assert!(response.diagnostics.is_empty());
+
+        // Note: In a real test we'd need to handle the 5-second sleep, but mockito
+        // doesn't actually execute it when mocking the HTTP calls
     }
 
     #[tokio::test]
