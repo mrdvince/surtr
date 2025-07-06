@@ -129,6 +129,12 @@ impl Resource for QemuVmResource {
                     .build(),
             )
             .attribute(
+                AttributeBuilder::new("start", AttributeType::Bool)
+                    .description("Start VM immediately after creation")
+                    .optional()
+                    .build(),
+            )
+            .attribute(
                 AttributeBuilder::new("tablet", AttributeType::Bool)
                     .description("Enable tablet device for mouse")
                     .optional()
@@ -756,6 +762,7 @@ impl QemuVmResource {
         let ostype = config.get_string(&AttributePath::new("ostype")).ok();
         let agent = config.get_string(&AttributePath::new("agent")).ok();
         let onboot = config.get_bool(&AttributePath::new("onboot")).ok();
+        let start = config.get_bool(&AttributePath::new("start")).ok();
         let tablet = config.get_bool(&AttributePath::new("tablet")).ok();
         let protection = config.get_bool(&AttributePath::new("protection")).ok();
         let tags = config.get_string(&AttributePath::new("tags")).ok();
@@ -789,6 +796,7 @@ impl QemuVmResource {
             ostype,
             agent,
             onboot,
+            start,
             tablet,
             protection,
             tags,

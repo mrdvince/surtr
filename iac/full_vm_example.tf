@@ -21,6 +21,7 @@ resource "proxmox_qemu_vm" "this" {
   ipconfig0   = "ip=dhcp"
   agent       = "1"
   onboot      = true
+  start       = true  # Start VM immediately after creation
   protection  = false
   tags        = "cp,"
   description = "A control plane node"
@@ -46,6 +47,7 @@ resource "proxmox_qemu_vm" "web_server" {
 
   agent  = "1"
   onboot = true
+  start  = true
 
   tags = "web,production"
 }
@@ -64,6 +66,7 @@ resource "proxmox_qemu_vm" "database" {
   sshkeys    = file("~/.ssh/devkey.pub")
   ipconfig0  = "ip=192.168.100.50/24,gw=192.168.100.1"
   agent      = "1"
+  start      = true
   tags       = "database,postgres"
 }
 

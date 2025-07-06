@@ -581,6 +581,8 @@ pub struct CreateQemuRequest {
     pub vmstatestorage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<bool>,
 }
 
 /// Request for updating a VM
