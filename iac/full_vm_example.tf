@@ -63,7 +63,7 @@ resource "proxmox_qemu_vm" "database" {
   memory     = 512
   cpu        = "x86-64-v2-AES"
   scsi0      = "local-lvm:10,format=raw"
-  net0       = "virtio,bridge=vmbr0,tag=100,firewall=1"
+  net0       = "virtio,bridge=vmbr0,firewall=1,tag=100"
   ciuser     = "dbadmin"
   cipassword = "changeme123!"
   sshkeys    = file("~/.ssh/devkey.pub")

@@ -25,6 +25,74 @@ impl QemuVmResource {
         Self::default()
     }
 
+    fn normalize_tags(tags: &str) -> String {
+        tags.replace(';', ",")
+    }
+
+    fn normalize_network_config(net_config: &str, current_config: Option<&str>) -> String {
+        let should_remove_mac = current_config.map(|c| !c.contains(':')).unwrap_or(true);
+
+        let parts: Vec<&str> = net_config.split(',').collect();
+        let mut network_type = None;
+        let mut params = Vec::new();
+
+        for part in parts {
+            if let Some((key, value)) = part.split_once('=') {
+                if key == "virtio" || key == "e1000" || key == "rtl8139" || key == "vmxnet3" {
+                    if value.contains(':') && should_remove_mac {
+                        network_type = Some(key.to_string());
+                    } else {
+                        network_type = Some(part.to_string());
+                    }
+                } else {
+                    params.push((key, value));
+                }
+            } else {
+                // Handle cases where there's no '=' (like standalone virtio)
+                if part == "virtio" || part == "e1000" || part == "rtl8139" || part == "vmxnet3" {
+                    network_type = Some(part.to_string());
+                } else {
+                    params.push((part, ""));
+                }
+            }
+        }
+
+        // Sort parameters alphabetically by key
+        params.sort_by(|a, b| a.0.cmp(b.0));
+
+        // Reconstruct the config string
+        let mut result = Vec::new();
+        if let Some(nt) = network_type {
+            result.push(nt);
+        }
+
+        for (key, value) in params {
+            if value.is_empty() {
+                result.push(key.to_string());
+            } else {
+                result.push(format!("{}={}", key, value));
+            }
+        }
+
+        result.join(",")
+    }
+
+    fn normalize_disk_config(disk_config: &str, current_config: Option<&str>) -> String {
+        // Proxmox returns disk configs like "local-lvm:vm-9003-disk-1,size=10G"
+        // But Terraform expects "local-lvm:10,format=raw"
+
+        if let Some(current) = current_config {
+            // If current config has a simple format like "storage:size,format=raw"
+            // we should return that instead of the detailed Proxmox response
+            if current.contains("format=") && !current.contains("vm-") {
+                return current.to_string();
+            }
+        }
+
+        // Otherwise return the disk config as-is
+        disk_config.to_string()
+    }
+
     fn validate_iothread(&self, config: &DynamicValue, diagnostics: &mut Vec<Diagnostic>) {
         // Check SCSI disks with iothread
         for i in 0..=30 {
@@ -436,7 +504,7 @@ impl Resource for QemuVmResource {
         };
 
         match self.extract_vm_config(&request.config) {
-            Ok((node, _vmid, create_request)) => {
+            Ok((node, vmid, create_request)) => {
                 match provider_data
                     .client
                     .nodes()
@@ -445,11 +513,43 @@ impl Resource for QemuVmResource {
                     .create(create_request.vmid, &create_request)
                     .await
                 {
-                    Ok(_task_id) => CreateResourceResponse {
-                        new_state: request.planned_state,
-                        private: vec![],
-                        diagnostics,
-                    },
+                    Ok(_task_id) => {
+                        // Fetch the actual VM configuration after creation
+                        match provider_data
+                            .client
+                            .nodes()
+                            .node(&node)
+                            .qemu()
+                            .get_config(vmid)
+                            .await
+                        {
+                            Ok(vm_config) => {
+                                let mut new_state = request.planned_state.clone();
+                                Self::populate_state_from_config(
+                                    &mut new_state,
+                                    &vm_config,
+                                    &request.planned_state,
+                                );
+
+                                CreateResourceResponse {
+                                    new_state,
+                                    private: vec![],
+                                    diagnostics,
+                                }
+                            }
+                            Err(e) => {
+                                diagnostics.push(Diagnostic::warning(
+                                    "Failed to read VM configuration after creation",
+                                    format!("VM was created but reading configuration failed: {}. Using planned state.", e),
+                                ));
+                                CreateResourceResponse {
+                                    new_state: request.planned_state,
+                                    private: vec![],
+                                    diagnostics,
+                                }
+                            }
+                        }
+                    }
                     Err(e) => {
                         diagnostics.push(Diagnostic::error(
                             "Failed to create VM",
@@ -538,96 +638,11 @@ impl Resource for QemuVmResource {
         {
             Ok(vm_config) => {
                 let mut new_state = request.current_state.clone();
-
-                if let Some(name) = vm_config.name {
-                    let _ = new_state.set_string(&AttributePath::new("name"), name);
-                }
-                if let Some(cores) = vm_config.cores {
-                    let _ = new_state.set_number(&AttributePath::new("cores"), cores as f64);
-                }
-                if let Some(sockets) = vm_config.sockets {
-                    let _ = new_state.set_number(&AttributePath::new("sockets"), sockets as f64);
-                }
-                if let Some(memory) = vm_config.memory {
-                    let _ = new_state.set_number(&AttributePath::new("memory"), memory as f64);
-                }
-                if let Some(cpu) = vm_config.cpu {
-                    let _ = new_state.set_string(&AttributePath::new("cpu"), cpu);
-                }
-                if let Some(bios) = vm_config.bios {
-                    let _ = new_state.set_string(&AttributePath::new("bios"), bios);
-                }
-                if let Some(boot) = vm_config.boot {
-                    let _ = new_state.set_string(&AttributePath::new("boot"), boot);
-                }
-                if let Some(scsihw) = vm_config.scsihw {
-                    let _ = new_state.set_string(&AttributePath::new("scsihw"), scsihw);
-                }
-                if let Some(ostype) = vm_config.ostype {
-                    let _ = new_state.set_string(&AttributePath::new("ostype"), ostype);
-                }
-                if let Some(agent) = vm_config.agent {
-                    let _ = new_state.set_string(&AttributePath::new("agent"), agent);
-                }
-                if let Some(onboot) = vm_config.onboot {
-                    let _ = new_state.set_bool(&AttributePath::new("onboot"), onboot);
-                }
-                if let Some(tablet) = vm_config.tablet {
-                    let _ = new_state.set_bool(&AttributePath::new("tablet"), tablet);
-                }
-                if let Some(protection) = vm_config.protection {
-                    let _ = new_state.set_bool(&AttributePath::new("protection"), protection);
-                }
-                if let Some(tags) = vm_config.tags {
-                    let _ = new_state.set_string(&AttributePath::new("tags"), tags);
-                }
-                if let Some(description) = vm_config.description {
-                    let _ = new_state.set_string(&AttributePath::new("description"), description);
-                }
-
-                if let Some(scsi0) = vm_config.scsi0 {
-                    let _ = new_state.set_string(&AttributePath::new("scsi0"), scsi0);
-                }
-                if let Some(scsi1) = vm_config.scsi1 {
-                    let _ = new_state.set_string(&AttributePath::new("scsi1"), scsi1);
-                }
-                if let Some(scsi2) = vm_config.scsi2 {
-                    let _ = new_state.set_string(&AttributePath::new("scsi2"), scsi2);
-                }
-                if let Some(scsi3) = vm_config.scsi3 {
-                    let _ = new_state.set_string(&AttributePath::new("scsi3"), scsi3);
-                }
-                if let Some(virtio0) = vm_config.virtio0 {
-                    let _ = new_state.set_string(&AttributePath::new("virtio0"), virtio0);
-                }
-                if let Some(virtio1) = vm_config.virtio1 {
-                    let _ = new_state.set_string(&AttributePath::new("virtio1"), virtio1);
-                }
-                if let Some(ide0) = vm_config.ide0 {
-                    let _ = new_state.set_string(&AttributePath::new("ide0"), ide0);
-                }
-                if let Some(ide2) = vm_config.ide2 {
-                    let _ = new_state.set_string(&AttributePath::new("ide2"), ide2);
-                }
-                if let Some(sata0) = vm_config.sata0 {
-                    let _ = new_state.set_string(&AttributePath::new("sata0"), sata0);
-                }
-                if let Some(efidisk0) = vm_config.efidisk0 {
-                    let _ = new_state.set_string(&AttributePath::new("efidisk0"), efidisk0);
-                }
-
-                if let Some(net0) = vm_config.net0 {
-                    let _ = new_state.set_string(&AttributePath::new("net0"), net0);
-                }
-                if let Some(net1) = vm_config.net1 {
-                    let _ = new_state.set_string(&AttributePath::new("net1"), net1);
-                }
-                if let Some(net2) = vm_config.net2 {
-                    let _ = new_state.set_string(&AttributePath::new("net2"), net2);
-                }
-                if let Some(net3) = vm_config.net3 {
-                    let _ = new_state.set_string(&AttributePath::new("net3"), net3);
-                }
+                Self::populate_state_from_config(
+                    &mut new_state,
+                    &vm_config,
+                    &request.current_state,
+                );
 
                 ReadResourceResponse {
                     new_state: Some(new_state),
@@ -879,6 +894,177 @@ impl Resource for QemuVmResource {
 }
 
 impl QemuVmResource {
+    fn populate_state_from_config(
+        state: &mut DynamicValue,
+        vm_config: &crate::api::nodes::QemuConfig,
+        planned_state: &DynamicValue,
+    ) {
+        if let Some(name) = &vm_config.name {
+            let _ = state.set_string(&AttributePath::new("name"), name.clone());
+        }
+        if let Some(cores) = vm_config.cores {
+            let _ = state.set_number(&AttributePath::new("cores"), cores as f64);
+        }
+        if let Some(sockets) = vm_config.sockets {
+            let _ = state.set_number(&AttributePath::new("sockets"), sockets as f64);
+        }
+        if let Some(memory) = vm_config.memory {
+            let _ = state.set_number(&AttributePath::new("memory"), memory as f64);
+        }
+        if let Some(cpu) = &vm_config.cpu {
+            let _ = state.set_string(&AttributePath::new("cpu"), cpu.clone());
+        }
+        if let Some(bios) = &vm_config.bios {
+            let _ = state.set_string(&AttributePath::new("bios"), bios.clone());
+        }
+        if planned_state
+            .get_string(&AttributePath::new("boot"))
+            .is_ok()
+        {
+            if let Some(ref boot) = vm_config.boot {
+                let _ = state.set_string(&AttributePath::new("boot"), boot.clone());
+            }
+        }
+        if let Some(scsihw) = &vm_config.scsihw {
+            let _ = state.set_string(&AttributePath::new("scsihw"), scsihw.clone());
+        }
+        if let Some(ostype) = &vm_config.ostype {
+            let _ = state.set_string(&AttributePath::new("ostype"), ostype.clone());
+        }
+        if let Some(agent) = &vm_config.agent {
+            let _ = state.set_string(&AttributePath::new("agent"), agent.clone());
+        }
+        if let Some(onboot) = vm_config.onboot {
+            let _ = state.set_bool(&AttributePath::new("onboot"), onboot);
+        }
+        if let Some(tablet) = vm_config.tablet {
+            let _ = state.set_bool(&AttributePath::new("tablet"), tablet);
+        }
+        if let Some(protection) = vm_config.protection {
+            let _ = state.set_bool(&AttributePath::new("protection"), protection);
+        }
+        if let Some(tags) = &vm_config.tags {
+            let normalized_tags = Self::normalize_tags(tags);
+            let _ = state.set_string(&AttributePath::new("tags"), normalized_tags);
+        }
+        if let Some(description) = &vm_config.description {
+            let _ = state.set_string(&AttributePath::new("description"), description.clone());
+        }
+
+        // Disk configurations
+        if let Some(scsi0) = &vm_config.scsi0 {
+            let current_scsi0 = planned_state.get_string(&AttributePath::new("scsi0")).ok();
+            let normalized_disk = Self::normalize_disk_config(scsi0, current_scsi0.as_deref());
+            let _ = state.set_string(&AttributePath::new("scsi0"), normalized_disk);
+        }
+        if let Some(scsi1) = &vm_config.scsi1 {
+            let current_scsi1 = planned_state.get_string(&AttributePath::new("scsi1")).ok();
+            let normalized_disk = Self::normalize_disk_config(scsi1, current_scsi1.as_deref());
+            let _ = state.set_string(&AttributePath::new("scsi1"), normalized_disk);
+        }
+        if let Some(scsi2) = &vm_config.scsi2 {
+            let current_scsi2 = planned_state.get_string(&AttributePath::new("scsi2")).ok();
+            let normalized_disk = Self::normalize_disk_config(scsi2, current_scsi2.as_deref());
+            let _ = state.set_string(&AttributePath::new("scsi2"), normalized_disk);
+        }
+        if let Some(scsi3) = &vm_config.scsi3 {
+            let current_scsi3 = planned_state.get_string(&AttributePath::new("scsi3")).ok();
+            let normalized_disk = Self::normalize_disk_config(scsi3, current_scsi3.as_deref());
+            let _ = state.set_string(&AttributePath::new("scsi3"), normalized_disk);
+        }
+        if let Some(virtio0) = &vm_config.virtio0 {
+            let current_virtio0 = planned_state
+                .get_string(&AttributePath::new("virtio0"))
+                .ok();
+            let normalized_disk = Self::normalize_disk_config(virtio0, current_virtio0.as_deref());
+            let _ = state.set_string(&AttributePath::new("virtio0"), normalized_disk);
+        }
+        if let Some(virtio1) = &vm_config.virtio1 {
+            let current_virtio1 = planned_state
+                .get_string(&AttributePath::new("virtio1"))
+                .ok();
+            let normalized_disk = Self::normalize_disk_config(virtio1, current_virtio1.as_deref());
+            let _ = state.set_string(&AttributePath::new("virtio1"), normalized_disk);
+        }
+        if let Some(ide0) = &vm_config.ide0 {
+            let current_ide0 = planned_state.get_string(&AttributePath::new("ide0")).ok();
+            let normalized_disk = Self::normalize_disk_config(ide0, current_ide0.as_deref());
+            let _ = state.set_string(&AttributePath::new("ide0"), normalized_disk);
+        }
+        if let Some(ide2) = &vm_config.ide2 {
+            let current_ide2 = planned_state.get_string(&AttributePath::new("ide2")).ok();
+            let normalized_disk = Self::normalize_disk_config(ide2, current_ide2.as_deref());
+            let _ = state.set_string(&AttributePath::new("ide2"), normalized_disk);
+        }
+        if let Some(sata0) = &vm_config.sata0 {
+            let current_sata0 = planned_state.get_string(&AttributePath::new("sata0")).ok();
+            let normalized_disk = Self::normalize_disk_config(sata0, current_sata0.as_deref());
+            let _ = state.set_string(&AttributePath::new("sata0"), normalized_disk);
+        }
+        if let Some(efidisk0) = &vm_config.efidisk0 {
+            let current_efidisk0 = planned_state
+                .get_string(&AttributePath::new("efidisk0"))
+                .ok();
+            let normalized_disk =
+                Self::normalize_disk_config(efidisk0, current_efidisk0.as_deref());
+            let _ = state.set_string(&AttributePath::new("efidisk0"), normalized_disk);
+        }
+
+        // Network configurations
+        if let Some(net0) = &vm_config.net0 {
+            let current_net0 = planned_state.get_string(&AttributePath::new("net0")).ok();
+            let normalized_net = Self::normalize_network_config(net0, current_net0.as_deref());
+            let _ = state.set_string(&AttributePath::new("net0"), normalized_net);
+        }
+        if let Some(net1) = &vm_config.net1 {
+            let current_net1 = planned_state.get_string(&AttributePath::new("net1")).ok();
+            let normalized_net = Self::normalize_network_config(net1, current_net1.as_deref());
+            let _ = state.set_string(&AttributePath::new("net1"), normalized_net);
+        }
+        if let Some(net2) = &vm_config.net2 {
+            let current_net2 = planned_state.get_string(&AttributePath::new("net2")).ok();
+            let normalized_net = Self::normalize_network_config(net2, current_net2.as_deref());
+            let _ = state.set_string(&AttributePath::new("net2"), normalized_net);
+        }
+        if let Some(net3) = &vm_config.net3 {
+            let current_net3 = planned_state.get_string(&AttributePath::new("net3")).ok();
+            let normalized_net = Self::normalize_network_config(net3, current_net3.as_deref());
+            let _ = state.set_string(&AttributePath::new("net3"), normalized_net);
+        }
+
+        // Preserve certain fields from planned state that Proxmox doesn't return
+        if vm_config.boot.is_none() {
+            if let Ok(boot) = planned_state.get_string(&AttributePath::new("boot")) {
+                let _ = state.set_string(&AttributePath::new("boot"), boot);
+            }
+        }
+
+        if let Ok(start) = planned_state.get_bool(&AttributePath::new("start")) {
+            let _ = state.set_bool(&AttributePath::new("start"), start);
+        }
+        if let Ok(ciuser) = planned_state.get_string(&AttributePath::new("ciuser")) {
+            let _ = state.set_string(&AttributePath::new("ciuser"), ciuser);
+        }
+        if let Ok(cipassword) = planned_state.get_string(&AttributePath::new("cipassword")) {
+            let _ = state.set_string(&AttributePath::new("cipassword"), cipassword);
+        }
+        if let Ok(sshkeys) = planned_state.get_string(&AttributePath::new("sshkeys")) {
+            let _ = state.set_string(&AttributePath::new("sshkeys"), sshkeys);
+        }
+        if let Ok(ipconfig0) = planned_state.get_string(&AttributePath::new("ipconfig0")) {
+            let _ = state.set_string(&AttributePath::new("ipconfig0"), ipconfig0);
+        }
+        if let Ok(ipconfig1) = planned_state.get_string(&AttributePath::new("ipconfig1")) {
+            let _ = state.set_string(&AttributePath::new("ipconfig1"), ipconfig1);
+        }
+        if let Ok(ipconfig2) = planned_state.get_string(&AttributePath::new("ipconfig2")) {
+            let _ = state.set_string(&AttributePath::new("ipconfig2"), ipconfig2);
+        }
+        if let Ok(ipconfig3) = planned_state.get_string(&AttributePath::new("ipconfig3")) {
+            let _ = state.set_string(&AttributePath::new("ipconfig3"), ipconfig3);
+        }
+    }
+
     fn extract_vm_config(
         &self,
         config: &DynamicValue,
@@ -929,10 +1115,22 @@ impl QemuVmResource {
         let sata0 = config.get_string(&AttributePath::new("sata0")).ok();
         let efidisk0 = config.get_string(&AttributePath::new("efidisk0")).ok();
 
-        let net0 = config.get_string(&AttributePath::new("net0")).ok();
-        let net1 = config.get_string(&AttributePath::new("net1")).ok();
-        let net2 = config.get_string(&AttributePath::new("net2")).ok();
-        let net3 = config.get_string(&AttributePath::new("net3")).ok();
+        let net0 = config
+            .get_string(&AttributePath::new("net0"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net1 = config
+            .get_string(&AttributePath::new("net1"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net2 = config
+            .get_string(&AttributePath::new("net2"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net3 = config
+            .get_string(&AttributePath::new("net3"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
 
         let create_request = crate::api::nodes::CreateQemuRequest {
             vmid,
@@ -1083,10 +1281,22 @@ impl QemuVmResource {
         let sata0 = config.get_string(&AttributePath::new("sata0")).ok();
         let efidisk0 = config.get_string(&AttributePath::new("efidisk0")).ok();
 
-        let net0 = config.get_string(&AttributePath::new("net0")).ok();
-        let net1 = config.get_string(&AttributePath::new("net1")).ok();
-        let net2 = config.get_string(&AttributePath::new("net2")).ok();
-        let net3 = config.get_string(&AttributePath::new("net3")).ok();
+        let net0 = config
+            .get_string(&AttributePath::new("net0"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net1 = config
+            .get_string(&AttributePath::new("net1"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net2 = config
+            .get_string(&AttributePath::new("net2"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
+        let net3 = config
+            .get_string(&AttributePath::new("net3"))
+            .ok()
+            .map(|n| Self::normalize_network_config(&n, Some(&n)));
 
         Ok(crate::api::nodes::UpdateQemuRequest {
             name,

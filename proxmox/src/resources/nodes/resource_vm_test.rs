@@ -136,6 +136,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_normalizes_tags() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/config")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "vmid": 100,
+                    "name": "test-vm",
+                    "cores": 2,
+                    "sockets": 1,
+                    "memory": 2048,
+                    "tags": "web;production;test"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut resource = QemuVmResource::new();
+        let provider_data = create_test_provider_data(&server.url());
+        resource.provider_data = Some(provider_data);
+
+        let ctx = Context::new();
+        let request = ReadResourceRequest {
+            type_name: "proxmox_qemu_vm".to_string(),
+            current_state: create_test_dynamic_value(),
+            private: vec![],
+            client_capabilities: ClientCapabilities {
+                deferral_allowed: false,
+                write_only_attributes_allowed: false,
+            },
+            provider_meta: None,
+            current_identity: None,
+        };
+
+        let response = resource.read(ctx, request).await;
+        assert!(response.diagnostics.is_empty());
+        assert!(response.new_state.is_some());
+
+        let new_state = response.new_state.unwrap();
+        let tags = new_state.get_string(&AttributePath::new("tags")).unwrap();
+        assert_eq!(tags, "web,production,test");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_read_preserves_boot_order() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/config")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "vmid": 100,
+                    "name": "test-vm",
+                    "cores": 2,
+                    "sockets": 1,
+                    "memory": 2048,
+                    "boot": "order=scsi0;ide2;net0"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut resource = QemuVmResource::new();
+        let provider_data = create_test_provider_data(&server.url());
+        resource.provider_data = Some(provider_data);
+
+        let ctx = Context::new();
+        let request = ReadResourceRequest {
+            type_name: "proxmox_qemu_vm".to_string(),
+            current_state: create_test_dynamic_value(),
+            private: vec![],
+            client_capabilities: ClientCapabilities {
+                deferral_allowed: false,
+                write_only_attributes_allowed: false,
+            },
+            provider_meta: None,
+            current_identity: None,
+        };
+
+        let response = resource.read(ctx, request).await;
+        assert!(response.diagnostics.is_empty());
+        assert!(response.new_state.is_some());
+
+        let new_state = response.new_state.unwrap();
+        // Boot should not be set if it wasn't in the current state
+        assert!(new_state.get_string(&AttributePath::new("boot")).is_err());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_read_normalizes_network_macs() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/config")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "vmid": 100,
+                    "name": "test-vm",
+                    "cores": 2,
+                    "sockets": 1,
+                    "memory": 2048,
+                    "net0": "virtio=BA:88:CB:76:75:D6,bridge=vmbr0,firewall=0,tag=30"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut resource = QemuVmResource::new();
+        let provider_data = create_test_provider_data(&server.url());
+        resource.provider_data = Some(provider_data);
+
+        let ctx = Context::new();
+        let request = ReadResourceRequest {
+            type_name: "proxmox_qemu_vm".to_string(),
+            current_state: create_test_dynamic_value(),
+            private: vec![],
+            client_capabilities: ClientCapabilities {
+                deferral_allowed: false,
+                write_only_attributes_allowed: false,
+            },
+            provider_meta: None,
+            current_identity: None,
+        };
+
+        let response = resource.read(ctx, request).await;
+        assert!(response.diagnostics.is_empty());
+        assert!(response.new_state.is_some());
+
+        let new_state = response.new_state.unwrap();
+        let net0 = new_state.get_string(&AttributePath::new("net0")).unwrap();
+        // When current config doesn't have a MAC, it should be stripped from the response
+        assert_eq!(net0, "virtio,bridge=vmbr0,firewall=0,tag=30");
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_normalize_network_config_sorts_parameters() {
+        // Test that parameters are sorted alphabetically
+        let net_config = "virtio,bridge=vmbr0,firewall=1,tag=100";
+        let normalized = QemuVmResource::normalize_network_config(net_config, None);
+        assert_eq!(normalized, "virtio,bridge=vmbr0,firewall=1,tag=100");
+
+        // Test with different order
+        let net_config = "virtio,tag=100,bridge=vmbr0,firewall=1";
+        let normalized = QemuVmResource::normalize_network_config(net_config, None);
+        assert_eq!(normalized, "virtio,bridge=vmbr0,firewall=1,tag=100");
+
+        // Test with MAC address that should be removed
+        let net_config = "virtio=BA:88:CB:76:75:D6,tag=100,bridge=vmbr0,firewall=1";
+        let normalized = QemuVmResource::normalize_network_config(
+            net_config,
+            Some("virtio,bridge=vmbr0,tag=100,firewall=1"),
+        );
+        assert_eq!(normalized, "virtio,bridge=vmbr0,firewall=1,tag=100");
+
+        // Test with MAC address that should be kept
+        let net_config = "virtio=BA:88:CB:76:75:D6,tag=100,bridge=vmbr0,firewall=1";
+        let normalized = QemuVmResource::normalize_network_config(
+            net_config,
+            Some("virtio=BA:88:CB:76:75:D6,bridge=vmbr0,tag=100,firewall=1"),
+        );
+        assert_eq!(
+            normalized,
+            "virtio=BA:88:CB:76:75:D6,bridge=vmbr0,firewall=1,tag=100"
+        );
+    }
+
+    #[tokio::test]
     async fn test_validate_invalid_memory() {
         let resource = QemuVmResource::new();
         let ctx = Context::new();
@@ -207,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_successful() {
         let mut server = Server::new_async().await;
-        let _m = server
+        let _m1 = server
             .mock("POST", "/api2/json/nodes/pve/qemu")
             .match_header("content-type", "application/json")
             .match_body(Matcher::JsonString(
@@ -218,6 +398,24 @@ mod tests {
             .with_body(
                 r#"{
                 "data": "UPID:pve:00001234:00000000:5F000000:qmcreate:100:root@pam:"
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/config")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "name": "test-vm",
+                    "cores": 2,
+                    "memory": 2048,
+                    "sockets": 1,
+                    "vmid": 100
+                }
             }"#,
             )
             .create_async()
@@ -642,5 +840,71 @@ mod tests {
         let factory: fn() -> Box<dyn ResourceWithConfigure> = || Box::new(QemuVmResource::new());
         let resource = factory();
         assert_eq!(resource.type_name(), "proxmox_qemu_vm");
+    }
+
+    #[tokio::test]
+    async fn test_create_populates_network_interfaces() {
+        let mut server = Server::new_async().await;
+        let _m1 = server
+            .mock("POST", "/api2/json/nodes/pve/qemu")
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": "UPID:pve:00001234:00000000:5F000000:qmcreate:100:root@pam:"
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/api2/json/nodes/pve/qemu/100/config")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": {
+                    "name": "test-vm",
+                    "cores": 2,
+                    "memory": 2048,
+                    "sockets": 1,
+                    "vmid": 100,
+                    "net0": "virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1"
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut resource = QemuVmResource::new();
+        resource.provider_data = Some(create_test_provider_data(&server.url()));
+
+        let mut config = create_test_dynamic_value();
+        config
+            .set_string(
+                &AttributePath::new("net0"),
+                "virtio,bridge=vmbr0,firewall=1".to_string(),
+            )
+            .unwrap();
+
+        let ctx = Context::new();
+        let request = CreateResourceRequest {
+            type_name: "proxmox_qemu_vm".to_string(),
+            config: config.clone(),
+            planned_state: config,
+            planned_private: vec![],
+            provider_meta: Some(DynamicValue::null()),
+        };
+
+        let response = resource.create(ctx, request).await;
+        assert!(response.diagnostics.is_empty());
+
+        // Verify network interface was populated with normalized value
+        let net0 = response
+            .new_state
+            .get_string(&AttributePath::new("net0"))
+            .unwrap();
+        assert_eq!(net0, "virtio,bridge=vmbr0,firewall=1");
     }
 }

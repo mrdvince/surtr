@@ -3,7 +3,6 @@
 use super::super::common::{deserialize_proxmox_bool_option, ProxmoxApiResource};
 use serde::{Deserialize, Serialize};
 
-/// Type alias for realm configuration
 pub type Realm = RealmConfig;
 
 /// Realm configuration
