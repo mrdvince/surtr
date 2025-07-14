@@ -87,98 +87,6 @@ impl QemuVmResource {
         Ok(parts.join(","))
     }
 
-    fn disk_block_to_string(disk: &Dynamic) -> Result<(String, String), String> {
-        let disk_map = match disk {
-            Dynamic::Map(map) => map,
-            _ => return Err("Disk must be a map".to_string()),
-        };
-
-        let interface = disk_map
-            .get("interface")
-            .and_then(|v| match v {
-                Dynamic::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or("Interface is required")?;
-
-        let storage = disk_map
-            .get("storage")
-            .and_then(|v| match v {
-                Dynamic::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .ok_or("Storage is required")?;
-
-        let media = disk_map.get("media").and_then(|v| match v {
-            Dynamic::String(s) => Some(s.as_str()),
-            _ => None,
-        });
-
-        let iso = disk_map.get("iso").and_then(|v| match v {
-            Dynamic::String(s) => Some(s.as_str()),
-            _ => None,
-        });
-
-        let mut parts = vec![];
-
-        if let Some(iso_path) = iso {
-            parts.push(format!("{}:{}", storage, iso_path));
-        } else if media == Some("cloudinit") {
-            parts.push(storage.to_string());
-        } else {
-            let size = disk_map
-                .get("size")
-                .and_then(|v| match v {
-                    Dynamic::String(s) => Some(s.trim_end_matches('G')),
-                    _ => None,
-                })
-                .ok_or("Size is required for regular disks")?;
-            parts.push(format!("{}:{}", storage, size));
-        }
-
-        if let Some(media_type) = media {
-            parts.push(format!("media={}", media_type));
-        }
-
-        if media != Some("cdrom") && media != Some("cloudinit") {
-            if let Some(Dynamic::String(format)) = disk_map.get("format") {
-                parts.push(format!("format={}", format));
-            }
-        }
-
-        if let Some(Dynamic::Bool(iothread)) = disk_map.get("iothread") {
-            if *iothread {
-                parts.push("iothread=1".to_string());
-            }
-        }
-
-        if let Some(Dynamic::Bool(ssd)) = disk_map.get("ssd") {
-            if *ssd {
-                parts.push("ssd=1".to_string());
-            }
-        }
-
-        if let Some(Dynamic::Bool(discard)) = disk_map.get("discard") {
-            if *discard {
-                parts.push("discard=on".to_string());
-            }
-        }
-
-        if let Some(Dynamic::String(cache)) = disk_map.get("cache") {
-            parts.push(format!("cache={}", cache));
-        }
-
-        if let Some(Dynamic::Bool(backup)) = disk_map.get("backup") {
-            parts.push(format!("backup={}", if *backup { "1" } else { "0" }));
-        }
-
-        if let Some(Dynamic::Bool(replicate)) = disk_map.get("replicate") {
-            parts.push(format!("replicate={}", if *replicate { "1" } else { "0" }));
-        }
-
-        Ok((interface, parts.join(",")))
-    }
-
     fn parse_network_string(net_string: &str, id: u32) -> Dynamic {
         let mut map = std::collections::HashMap::new();
         map.insert("id".to_string(), Dynamic::Number(id as f64));
@@ -580,9 +488,7 @@ impl QemuVmResource {
         Ok((slot, format!("{},media=cdrom", iso)))
     }
 
-    fn cloudinit_drive_block_to_api_string(
-        ci_drive: &Dynamic,
-    ) -> Result<(String, String), String> {
+    fn cloudinit_drive_block_to_api_string(ci_drive: &Dynamic) -> Result<(String, String), String> {
         let ci_map = match ci_drive {
             Dynamic::Map(map) => map,
             _ => return Err("Cloud-init drive must be a map".to_string()),
@@ -2416,8 +2322,7 @@ impl QemuVmResource {
         // Process cloudinit_drive blocks
         if let Ok(cloudinit_drives) = config.get_list(&AttributePath::new("cloudinit_drive")) {
             for ci_drive in cloudinit_drives {
-                if let Ok((slot, ci_string)) =
-                    Self::cloudinit_drive_block_to_api_string(&ci_drive)
+                if let Ok((slot, ci_string)) = Self::cloudinit_drive_block_to_api_string(&ci_drive)
                 {
                     if slot.as_str() == "ide3" {
                         ide3 = Some(ci_string);
@@ -2667,8 +2572,8 @@ impl QemuVmResource {
         // Check for disk blocks
         if let Ok(disks) = config.get_list(&AttributePath::new("disk")) {
             for disk in disks {
-                if let Ok((interface, disk_string)) = Self::disk_block_to_string(&disk) {
-                    match interface.as_str() {
+                if let Ok((slot, disk_string)) = Self::disk_block_to_api_string(&disk) {
+                    match slot.as_str() {
                         "scsi0" => scsi0 = Some(disk_string),
                         "scsi1" => scsi1 = Some(disk_string),
                         "scsi2" => scsi2 = Some(disk_string),

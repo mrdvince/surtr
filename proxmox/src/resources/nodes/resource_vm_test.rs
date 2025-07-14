@@ -792,10 +792,14 @@ mod tests {
         disk0.insert("size".to_string(), Dynamic::String("10G".to_string()));
         disk0.insert("format".to_string(), Dynamic::String("raw".to_string()));
         disk0.insert("iothread".to_string(), Dynamic::Bool(true));
+        // Add slot and type fields required by disk_block_to_api_string
+        disk0.insert("slot".to_string(), Dynamic::String("scsi0".to_string()));
+        disk0.insert("type".to_string(), Dynamic::String("scsi".to_string()));
+        disk0.remove("interface");
         disks.push(Dynamic::Map(disk0));
 
-        let (interface, disk_string) = QemuVmResource::disk_block_to_string(&disks[0]).unwrap();
-        assert_eq!(interface, "scsi0");
+        let (slot, disk_string) = QemuVmResource::disk_block_to_api_string(&disks[0]).unwrap();
+        assert_eq!(slot, "scsi0");
         assert!(disk_string.contains("local-lvm:"));
         assert!(disk_string.contains("10"));
         assert!(disk_string.contains("format=raw"));
@@ -1360,20 +1364,18 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_block_to_string_for_iso() {
-        let mut disk = std::collections::HashMap::new();
-        disk.insert("interface".to_string(), Dynamic::String("ide2".to_string()));
-        disk.insert("storage".to_string(), Dynamic::String("local".to_string()));
-        disk.insert(
+    fn test_cdrom_block_to_api_string() {
+        let mut cdrom = std::collections::HashMap::new();
+        cdrom.insert("slot".to_string(), Dynamic::String("ide2".to_string()));
+        cdrom.insert(
             "iso".to_string(),
-            Dynamic::String("iso/ubuntu-22.04.iso".to_string()),
+            Dynamic::String("local:iso/ubuntu-22.04.iso".to_string()),
         );
-        disk.insert("media".to_string(), Dynamic::String("cdrom".to_string()));
 
-        let (interface, disk_string) =
-            QemuVmResource::disk_block_to_string(&Dynamic::Map(disk)).unwrap();
-        assert_eq!(interface, "ide2");
-        assert_eq!(disk_string, "local:iso/ubuntu-22.04.iso,media=cdrom");
+        let (slot, cdrom_string) =
+            QemuVmResource::cdrom_block_to_api_string(&Dynamic::Map(cdrom)).unwrap();
+        assert_eq!(slot, "ide2");
+        assert_eq!(cdrom_string, "local:iso/ubuntu-22.04.iso,media=cdrom");
     }
 
     #[test]
@@ -1400,22 +1402,18 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_block_to_string_for_cloudinit() {
-        let mut disk = std::collections::HashMap::new();
-        disk.insert("interface".to_string(), Dynamic::String("ide2".to_string()));
-        disk.insert(
+    fn test_cloudinit_drive_block_to_api_string() {
+        let mut cloudinit = std::collections::HashMap::new();
+        cloudinit.insert("slot".to_string(), Dynamic::String("ide3".to_string()));
+        cloudinit.insert(
             "storage".to_string(),
             Dynamic::String("local-lvm".to_string()),
         );
-        disk.insert(
-            "media".to_string(),
-            Dynamic::String("cloudinit".to_string()),
-        );
 
-        let (interface, disk_string) =
-            QemuVmResource::disk_block_to_string(&Dynamic::Map(disk)).unwrap();
-        assert_eq!(interface, "ide2");
-        assert_eq!(disk_string, "local-lvm,media=cloudinit");
+        let (slot, cloudinit_string) =
+            QemuVmResource::cloudinit_drive_block_to_api_string(&Dynamic::Map(cloudinit)).unwrap();
+        assert_eq!(slot, "ide3");
+        assert_eq!(cloudinit_string, "local-lvm:cloudinit");
     }
 
     #[test]
