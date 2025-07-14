@@ -159,7 +159,7 @@ pub struct QemuVmInfo {
 }
 
 /// VM configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct QemuConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acpi: Option<bool>,
@@ -380,6 +380,11 @@ pub struct QemuConfig {
 pub struct CreateQemuRequest {
     pub vmid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "full_clone")]
+    pub full: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub acpi: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
@@ -583,6 +588,18 @@ pub struct CreateQemuRequest {
     pub watchdog: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ciuser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cipassword: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ciupgrade: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipconfig0: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipconfig1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sshkeys: Option<String>,
 }
 
 /// Request for updating a VM

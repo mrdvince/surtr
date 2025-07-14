@@ -8,8 +8,4 @@ terraform {
 }
 
 provider "proxmox" {
-  # endpoint, api_token, and insecure will be read from:
-  # - PROXMOX_ENDPOINT
-  # - PROXMOX_API_TOKEN  
-  # - PROXMOX_INSECURE
 }
